@@ -4,11 +4,15 @@
 name: Stock Analyzer Push
 
 on:
-  schedule:
-    # UTC = 北京时间 - 8
-    - cron: "0 1 * * *"   # 09:00 开盘前
-    - cron: "30 3 * * *"  # 11:30 午盘
-    - cron: "30 6 * * *"  # 14:30 尾盘
+  # GitHub 内置 schedule 在免费仓库可能延迟或漏跑；推荐改用 cron-job.org 触发 repository_dispatch。
+  # 启用 cron-job.org 后请注释掉下方 schedule，避免重复执行。
+  # schedule:
+  #   # UTC = 北京时间 - 8
+  #   - cron: "0 1 * * *"   # 09:00 开盘前
+  #   - cron: "30 3 * * *"  # 11:30 午盘
+  #   - cron: "30 6 * * *"  # 14:30 尾盘
+  repository_dispatch:
+    types: [stock-push]
   workflow_dispatch:
     inputs:
       push_time:
@@ -104,6 +108,11 @@ jobs:
           INPUT="${{ github.event.inputs.push_time }}"
           if [ -n "$INPUT" ]; then
             echo "push_time=$INPUT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PAYLOAD="${{ github.event.client_payload.push_time }}"
+          if [ -n "$PAYLOAD" ]; then
+            echo "push_time=$PAYLOAD" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           case "${{ github.event.schedule }}" in

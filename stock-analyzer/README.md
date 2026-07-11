@@ -113,7 +113,7 @@ nohup python3 main.py > stock_analyzer.log 2>&1 &
 
 定时任务仅推送**日常分析**（不含持仓）。持仓建议需手动执行 `--portfolio`。
 
-## GitHub Actions 定时推送（推荐）
+## GitHub Actions 定时推送
 
 本地 `nohup` 需电脑常开；可将代码推到 GitHub，由 Actions 在云端按北京时间定时执行。
 
@@ -158,9 +158,75 @@ git push -u origin main
 | 11:30 | 午盘 |
 | 14:30 | 尾盘 |
 
-每日三个时间点触发（含周末与法定节假日）。
+每日三个时间点触发（含周末与法定节假日）。程序内部会判断是否为交易日，非交易日自动跳过。
 
-### 4. 手动测试
+### 4. cron-job.org 定时触发（推荐，比 GitHub 内置 schedule 更稳定）
+
+GitHub Actions 内置 `schedule` 在免费仓库可能延迟数分钟甚至漏跑。改用 [cron-job.org](https://cron-job.org) 通过 API 触发 workflow，稳定性更好。
+
+#### 4.1 创建 GitHub Personal Access Token
+
+1. 打开 [GitHub → Settings → Developer settings → Personal access tokens](https://github.com/settings/tokens)
+2. 新建 **Fine-grained token**（或 Classic token）：
+   - 仓库权限：`susu108/AI_Stock_Analysis`（或你的仓库）
+   - 勾选 **Actions: Read and write**
+   - 勾选 **Contents: Read and write**（用于推送报告到 GitHub Pages）
+3. 复制生成的 token（形如 `github_pat_xxx` 或 `ghp_xxx`），妥善保存
+
+#### 4.2 在 cron-job.org 创建 3 个 Cron Job
+
+注册并登录 [cron-job.org](https://console.cron-job.org/)，分别创建以下任务（**时区选 `Asia/Shanghai`**）：
+
+| 任务名 | Cron 表达式 | push_time |
+|--------|-------------|-----------|
+| 股票分析-开盘前 | `0 9 * * *` | `09:00` |
+| 股票分析-午盘 | `30 11 * * *` | `11:30` |
+| 股票分析-尾盘 | `30 14 * * *` | `14:30` |
+
+每个任务的 HTTP 请求配置如下：
+
+| 字段 | 值 |
+|------|-----|
+| URL | `https://api.github.com/repos/susu108/AI_Stock_Analysis/dispatches` |
+| Method | `POST` |
+| Request body | 见下方 JSON（按任务替换 `push_time`） |
+| Request timeout | `30` 秒 |
+
+**Request body（JSON）：**
+
+```json
+{
+  "event_type": "stock-push",
+  "client_payload": {
+    "push_time": "09:00"
+  }
+}
+```
+
+**Request headers（添加 3 个）：**
+
+| Header | Value |
+|--------|-------|
+| `Accept` | `application/vnd.github+json` |
+| `Authorization` | `Bearer 你的GitHub_TOKEN` |
+| `X-GitHub-Api-Version` | `2022-11-28` |
+| `Content-Type` | `application/json` |
+
+> 若仓库名不是 `susu108/AI_Stock_Analysis`，请替换 URL 中的 owner/repo。
+
+#### 4.3 验证
+
+1. 在 cron-job.org 点击 **Run now** 手动触发一次
+2. 打开 GitHub 仓库 **Actions** 页，应看到 `Stock Analyzer Push` 正在运行
+3. 确认钉钉收到推送
+
+#### 4.4 注意事项
+
+- 工作流已默认**注释掉** GitHub 内置 `schedule`，避免与 cron-job.org 重复触发
+- cron-job.org 免费版足够使用；建议开启失败通知邮件
+- Token 仅保存在 cron-job.org 的 Header 中，不要提交到代码仓库
+
+### 5. 手动测试
 
 GitHub 仓库 **Actions → Stock Analyzer Push → Run workflow**，可选推送时刻做测试。
 
