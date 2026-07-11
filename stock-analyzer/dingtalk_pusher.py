@@ -13,7 +13,6 @@ from typing import Any
 import requests
 
 import config
-from report_web import PublishDetailReport
 from trade_zones import ResolveTierRecommended
 from utils import (
     FormatAmount,
@@ -289,8 +288,6 @@ def _BuildComprehensivePredictionSection(
     analysis: dict[str, Any],
     advice: dict[str, Any],
     ai_tag: str,
-    detail_url: str | None = None,
-    detail_local_hint: str = "",
 ) -> list[str]:
     """构建 AI 分层综合预测章节。"""
     predictions = advice.get("predictions") or {}
@@ -338,10 +335,6 @@ def _BuildComprehensivePredictionSection(
     news_brief = _BuildNewsBriefSection(advice, ai_tag)
     if news_brief:
         lines.extend(news_brief)
-
-    detail_link = _BuildDetailReportLinkSection(detail_url, detail_local_hint)
-    if detail_link:
-        lines.extend(detail_link)
 
     lines.extend([
         "",
@@ -422,38 +415,6 @@ def _BuildNewsBriefSection(
         lines.append(f"- **{label}** {_TruncateText(move_headline, 100)}")
     lines.append("")
     return lines
-
-
-def _BuildDetailReportLinkSection(
-    detail_url: str | None = None,
-    detail_local_hint: str = "",
-) -> list[str]:
-    """构建醒目完整深度报告链接（置于资讯综合之后）。"""
-    if detail_url:
-        return [
-            "",
-            _SectionDivider(),
-            "",
-            '<font color="#1677FF">**📄 完整深度报告**</font>',
-            "",
-            f'<font color="#1677FF">**[👉 点击查看：涨跌归因 · 详细依据 · 资讯解读]({detail_url})**</font>',
-            "",
-            f"- **链接** {detail_url}",
-            "- **提示** 钉钉内若打不开，请长按复制上方链接，到 Safari/Chrome 打开",
-            "",
-            "<font color=\"#757575\">五维涨跌归因 / 买卖详细依据 / 四维资讯解读</font>",
-            "",
-        ]
-    if detail_local_hint:
-        return [
-            "",
-            _SectionDivider(),
-            "",
-            "**📄 完整深度报告**",
-            f"- {detail_local_hint}",
-            "",
-        ]
-    return []
 
 
 def _NextSection(section: list[int], title: str) -> str:
@@ -1191,6 +1152,53 @@ _DISCLAIMER_WEB = (
 )
 
 
+def _BuildDetailSectionsLines(
+    data: dict[str, Any],
+    analysis: dict[str, Any],
+    advice: dict[str, Any],
+    session_label: str = "盘中",
+    section_counter: list[int] | None = None,
+) -> list[str]:
+    """构建涨跌归因、详细依据、资讯解读章节（钉钉完整报告内嵌）。"""
+    rt = data.get("realtime") or {}
+    change_pct = rt.get("change_pct", 0)
+    ai_tag = "（AI）" if advice.get("llm_used") else ""
+    sec = section_counter if section_counter is not None else [99]
+    lines: list[str] = []
+
+    price_move = advice.get("price_move")
+    if price_move:
+        move_pct_hdr = float(price_move.get("move_pct", change_pct) or change_pct)
+        pct_text = FormatPercent(move_pct_hdr)
+        lines.extend([
+            "",
+            _SectionDivider(),
+            "",
+            _NextSection(sec, f"涨跌归因拆解（{pct_text}）"),
+        ])
+        lines.extend(_BuildPriceMoveSection(price_move, ai_tag))
+
+    lines.extend([
+        "",
+        _SectionDivider(),
+        "",
+        _NextSection(sec, f"详细依据{ai_tag}"),
+    ])
+    lines.extend(_BuildDetailedReasonsSection(advice))
+
+    news_section = _BuildNewsInterpretationSection(advice, ai_tag)
+    if news_section:
+        lines.extend([
+            "",
+            _SectionDivider(),
+            "",
+            _NextSection(sec, f"资讯解读{ai_tag}"),
+        ])
+        lines.extend(news_section)
+
+    return lines
+
+
 def BuildDetailSectionsMarkdown(
     data: dict[str, Any],
     analysis: dict[str, Any],
@@ -1198,50 +1206,15 @@ def BuildDetailSectionsMarkdown(
     session_label: str = "盘中",
     report_mode: str = "daily",
 ) -> str:
-    """构建网页详细报告 Markdown（涨跌归因 + 详细依据 + 资讯解读）。"""
-    rt = data.get("realtime") or {}
-    change_pct = rt.get("change_pct", 0)
+    """构建详细章节 Markdown（涨跌归因 + 详细依据 + 资讯解读）。"""
     ai_tag = "（AI）" if advice.get("llm_used") else ""
     lines: list[str] = [
         f"> {NowStr()} ｜ {session_label}",
         "",
     ]
-
-    price_move = advice.get("price_move")
-    detail_idx = 1
-    if price_move:
-        move_pct_hdr = float(price_move.get("move_pct", change_pct) or change_pct)
-        pct_text = FormatPercent(move_pct_hdr)
-        cn = _DIM_CN_NUMS[detail_idx] if detail_idx < len(_DIM_CN_NUMS) else str(detail_idx)
-        lines.extend([
-            _SectionDivider(),
-            "",
-            f'<h2 id="section-catalyst">{cn}、涨跌归因拆解（{pct_text}）</h2>',
-        ])
-        lines.extend(_BuildPriceMoveSection(price_move, ai_tag))
-        detail_idx += 1
-
-    cn = _DIM_CN_NUMS[detail_idx] if detail_idx < len(_DIM_CN_NUMS) else str(detail_idx)
-    lines.extend([
-        "",
-        _SectionDivider(),
-        "",
-        f'<h2 id="section-reasons">{cn}、详细依据{ai_tag}</h2>',
-    ])
-    lines.extend(_BuildDetailedReasonsSection(advice))
-    detail_idx += 1
-
-    news_section = _BuildNewsInterpretationSection(advice, ai_tag)
-    if news_section:
-        cn = _DIM_CN_NUMS[detail_idx] if detail_idx < len(_DIM_CN_NUMS) else str(detail_idx)
-        lines.extend([
-            "",
-            _SectionDivider(),
-            "",
-            f'<h2 id="section-news">{cn}、资讯解读{ai_tag}</h2>',
-        ])
-        lines.extend(news_section)
-
+    lines.extend(_BuildDetailSectionsLines(
+        data, analysis, advice, session_label, section_counter=[1],
+    ))
     lines.extend([
         "",
         _SectionDivider(),
@@ -1256,10 +1229,8 @@ def BuildDingTalkReportMarkdown(
     advice: dict[str, Any],
     session_label: str = "盘中",
     report_mode: str = "daily",
-    detail_url: str | None = None,
-    detail_local_hint: str = "",
 ) -> str:
-    """构建钉钉精简版 Markdown（不含涨跌归因/详细依据/资讯解读）。"""
+    """构建钉钉完整分析报告 Markdown（含涨跌归因/详细依据/资讯解读）。"""
     mode = advice.get("report_mode", report_mode)
     rt = data.get("realtime") or {}
     price = rt.get("price", analysis.get("indicators", {}).get("price", 0))
@@ -1348,11 +1319,7 @@ def BuildDingTalkReportMarkdown(
         _NextSection(sec, f"综合预测{ai_tag}"),
         "",
     ])
-    lines.extend(_BuildComprehensivePredictionSection(
-        analysis, advice, ai_tag,
-        detail_url=detail_url,
-        detail_local_hint=detail_local_hint,
-    ))
+    lines.extend(_BuildComprehensivePredictionSection(analysis, advice, ai_tag))
 
     lines.extend([
         "",
@@ -1416,6 +1383,10 @@ def BuildDingTalkReportMarkdown(
             reason = str(row.get("上榜原因", ""))
             lines.append(f"- {date_str} {reason}")
 
+    lines.extend(_BuildDetailSectionsLines(
+        data, analysis, advice, session_label, section_counter=sec,
+    ))
+
     lines.extend([
         "",
         _SectionDivider(),
@@ -1431,21 +1402,11 @@ def BuildReportMarkdown(
     advice: dict[str, Any],
     session_label: str = "盘中",
     report_mode: str = "daily",
-    full: bool = False,
-    detail_url: str | None = None,
+    full: bool = True,
 ) -> str:
-    """构建分析报告 Markdown；full=True 时含网页详细章节（调试用）。"""
-    if full:
-        dingtalk_part = BuildDingTalkReportMarkdown(
-            data, analysis, advice, session_label, report_mode, detail_url=None,
-        )
-        detail_part = BuildDetailSectionsMarkdown(
-            data, analysis, advice, session_label, report_mode,
-        )
-        return f"{dingtalk_part}\n\n---\n\n{detail_part}"
-
+    """构建分析报告 Markdown（默认含全部模块）。"""
     return BuildDingTalkReportMarkdown(
-        data, analysis, advice, session_label, report_mode, detail_url=detail_url,
+        data, analysis, advice, session_label, report_mode,
     )
 
 
@@ -1527,6 +1488,9 @@ def SendMarkdown(title: str, text: str) -> bool:
     except requests.RequestException as exc:
         logger.error("钉钉推送网络异常: %s", exc)
         return False
+    except ValueError as exc:
+        logger.error("钉钉推送响应解析失败: %s", exc)
+        return False
 
 
 def PushReport(
@@ -1537,53 +1501,10 @@ def PushReport(
     report_mode: str = "daily",
     push_time: str | None = None,
 ) -> bool:
-    """生成并推送分析报告（钉钉精简 + 网页详细）。"""
+    """生成并推送完整分析报告到钉钉。"""
     title = f"{config.STOCK_NAME}({config.STOCK_CODE}) {session_label}分析报告"
-    rt = data.get("realtime") or {}
-    change_pct = rt.get("change_pct", 0)
-
-    detail_url: str | None = None
-    detail_local_hint = ""
-    if config.REPORT_WEB_ENABLED:
-        detail_md = BuildDetailSectionsMarkdown(
-            data, analysis, advice, session_label, report_mode,
-        )
-        detail_title = f"{config.STOCK_NAME}({config.STOCK_CODE}) 深度报告"
-        detail_url = PublishDetailReport(
-            title=detail_title,
-            markdown_body=detail_md,
-            meta={
-                "stock_name": config.STOCK_NAME,
-                "stock_code": config.STOCK_CODE,
-                "session_label": session_label,
-                "change_pct": change_pct,
-                "generated_at": NowStr(),
-            },
-            session_label=session_label,
-            push_time=push_time,
-        )
-        if detail_url:
-            logger.info("详细报告链接: %s", detail_url)
-            local_path = config.ResolveReportWebOutputDir() / "latest.html"
-            logger.info(
-                "详细报告链接已生成；ghproxy 镜像 push 至 GitHub 后约 1~3 分钟生效"
-            )
-        elif config.REPORT_WEB_LOCAL_HINT:
-            local_path = config.ResolveReportWebOutputDir() / "latest.html"
-            if local_path.exists():
-                detail_local_hint = (
-                    f"（网页已生成: `{local_path}`，请在 .env 配置 "
-                    f"REPORT_WEB_CDN=ghproxy（自动走 GitHub Pages 镜像，勿用 raw.githubusercontent））"
-                )
-                logger.warning(
-                    "REPORT_WEB_BASE_URL 未配置或无效，钉钉不附公网链接。"
-                    "请确保 GitHub Pages 已开启（main/docs），并使用 ghproxy 镜像 Pages 地址"
-                )
-
     text = BuildDingTalkReportMarkdown(
         data, analysis, advice, session_label, report_mode,
-        detail_url=detail_url,
-        detail_local_hint=detail_local_hint,
     )
     return SendMarkdown(title, text)
 

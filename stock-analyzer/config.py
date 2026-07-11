@@ -93,9 +93,9 @@ WEB_SEARCH_CACHE_HOURS: int = _ParseInt(os.getenv("WEB_SEARCH_CACHE_HOURS"), 4)
 PRICE_MOVE_MIN_PCT: float = _ParseFloat(os.getenv("PRICE_MOVE_MIN_PCT"), 2.0)
 
 # 网页详细报告（GitHub Pages / jsDelivr CDN）
-REPORT_WEB_ENABLED: bool = _ParseBool(os.getenv("REPORT_WEB_ENABLED"), True)
+REPORT_WEB_ENABLED: bool = _ParseBool(os.getenv("REPORT_WEB_ENABLED"), False)
 REPORT_WEB_BASE_URL: str = os.getenv("REPORT_WEB_BASE_URL", "").strip().rstrip("/")
-REPORT_WEB_CDN: str = os.getenv("REPORT_WEB_CDN", "ghproxy").strip().lower()
+REPORT_WEB_CDN: str = os.getenv("REPORT_WEB_CDN", "github_pages").strip().lower()
 GITHUB_REPO: str = os.getenv("GITHUB_REPO", "susu108/AI_Stock_Analysis").strip()
 GITHUB_BRANCH: str = os.getenv("GITHUB_BRANCH", "main").strip()
 REPORT_WEB_GHPROXY: str = os.getenv("REPORT_WEB_GHPROXY", "https://ghfast.top").strip().rstrip("/")

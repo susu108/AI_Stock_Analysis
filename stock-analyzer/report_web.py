@@ -280,15 +280,36 @@ def IsValidReportWebBaseUrl(base_url: str) -> bool:
     return not any(token in base for token in invalid_tokens)
 
 
-def BuildDetailPublicUrl(filename: str) -> str | None:
-    """根据 BASE_URL 构建公网访问链接。"""
+def BuildDetailPublicUrl(filename: str = "latest.html") -> str | None:
+    """根据 BASE_URL 构建公网访问链接（主链接，优先 GitHub Pages）。"""
     base = config.ResolveReportWebBaseUrl().strip().rstrip("/")
     if not IsValidReportWebBaseUrl(base):
         return None
-    url = f"{base}/{filename}"
-    if "cdn.jsdelivr.net" in base or "ghfast.top" in base or "ghproxy" in base or "statically.io" in base:
-        url = f"{url}?v={datetime.now().strftime('%Y%m%d%H%M')}"
-    return url
+    return f"{base}/{filename}"
+
+
+def BuildDetailPublicUrlMirrors(filename: str = "latest.html") -> list[str]:
+    """构建备用访问链接（GitHub Pages + jsDelivr，均为标准 HTML 渲染）。"""
+    mirrors: list[str] = []
+    primary = BuildDetailPublicUrl(filename)
+    if primary:
+        mirrors.append(primary)
+
+    pages_base = config.BuildGithubPagesReportBase()
+    if pages_base:
+        pages_url = f"{pages_base}/{filename}"
+        if pages_url not in mirrors:
+            mirrors.append(pages_url)
+
+    if config.GITHUB_REPO:
+        jsdelivr_url = (
+            f"https://cdn.jsdelivr.net/gh/{config.GITHUB_REPO}"
+            f"@{config.GITHUB_BRANCH}/docs/reports/{filename}"
+        )
+        if jsdelivr_url not in mirrors:
+            mirrors.append(jsdelivr_url)
+
+    return mirrors
 
 
 def EnsureGithubPagesArtifacts(output_dir: Path) -> None:

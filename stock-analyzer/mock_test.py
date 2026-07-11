@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import tempfile
+import config
 from datetime import date
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-import config
 from advisor import GenerateAdvice
 from analyzer import AnalyzeAll, MergeNewsIntoAnalysis
 from dingtalk_pusher import (
-    BuildDetailSectionsMarkdown,
     BuildDingTalkReportMarkdown,
     BuildPortfolioReportMarkdown,
     BuildReportMarkdown,
@@ -23,7 +20,6 @@ from dingtalk_pusher import (
 from market_context import ResolvePredictionHorizon, ResolveSessionAndHorizon
 from news_analyzer import AnalyzeNewsImpact, CalcNewsScore
 from portfolio_advisor import GeneratePortfolioAdvice
-from report_web import PublishDetailReport, RenderDetailReportHtml
 
 
 def BuildMockKline(days: int = 60) -> pd.DataFrame:
@@ -327,7 +323,6 @@ def RunHorizonResolverTests(
         and "休市中" in sat_report
         and "资讯综合" in sat_report
         and "休市期间政策面偏暖" in sat_report
-        and "【个股资讯】" not in sat_report
     )
     return sat_ok, fri_ok, sat_dingtalk_ok
 
@@ -345,10 +340,6 @@ def RunMockTest() -> None:
     config.LLM_ENABLED = False
     config.STOCK_THEMES = ["GLP-1", "司美格鲁肽", "多肽原料药"]
     config.PRICE_MOVE_MIN_PCT = 2.0
-    config.REPORT_WEB_ENABLED = True
-    config.REPORT_WEB_BASE_URL = ""
-    config.REPORT_WEB_CDN = "ghproxy"
-    config.REPORT_WEB_OUTPUT_DIR = tempfile.mkdtemp(prefix="stock_report_")
 
     data = {
         "realtime": BuildMockRealtime(),
@@ -400,31 +391,10 @@ def RunMockTest() -> None:
     advice["news_summary"] = "政策面偏暖，GLP-1产业链受益，下一交易日关注开盘承接"
     advice["policy_impact"] = "司美格鲁肽纳入基药目录，产业链受益"
 
-    detail_md = BuildDetailSectionsMarkdown(
-        data, analysis, advice, session_label="收盘后", report_mode="daily",
-    )
-    detail_url = PublishDetailReport(
-        title=f"{config.STOCK_NAME} 深度报告",
-        markdown_body=detail_md,
-        meta={
-            "stock_name": config.STOCK_NAME,
-            "stock_code": config.STOCK_CODE,
-            "session_label": "收盘后",
-            "change_pct": data["realtime"]["change_pct"],
-        },
-        session_label="收盘后",
-    )
-    html = RenderDetailReportHtml(
-        f"{config.STOCK_NAME} 深度报告",
-        detail_md,
-        meta={"change_pct": data["realtime"]["change_pct"]},
-    )
-
     report = BuildDingTalkReportMarkdown(
         data, analysis, advice,
         session_label="收盘后",
         report_mode="daily",
-        detail_url=detail_url,
     )
 
     print(report)
@@ -441,16 +411,12 @@ def RunMockTest() -> None:
         "【政策/监管】",
         "【宏观事件】",
     ]
-    sections_ok = all(section in BuildReportMarkdown(
-        data, analysis, advice, session_label="收盘后", full=True,
-    ) for section in four_dim_sections)
-    dingtalk_compact_ok = all(section not in report for section in four_dim_sections)
+    sections_ok = all(section in report for section in four_dim_sections)
     categories_ok = all(by_cat.get(k, 0) > 0 for k in ("stock", "sector", "policy", "macro"))
     print(f"定价校验: 买入<{price}<卖出 → {'通过' if buy_ok else '失败'}")
     print(f"日常报告含持仓章节: {'否（正确）' if not has_portfolio_section else '是（错误）'}")
     print(f"相关资讯: {stats}")
     print(f"四维分节可见: {'通过' if sections_ok else '失败'}")
-    print(f"钉钉精简（四维不在正文）: {'通过' if dingtalk_compact_ok else '失败'}")
     print(f"四维分类计数: {'通过' if categories_ok else '失败'} — {by_cat}")
     news_merge_ok = (
         analysis.get("news_score", 0) != 0
@@ -519,40 +485,36 @@ def RunMockTest() -> None:
     print(f"周末钉钉资讯融合: {'通过' if sat_dingtalk_ok else '失败'}")
     news_brief_ok = "资讯综合" in report and "GLP-1产业链受益" in report
     news_idx = report.find("资讯综合")
-    detail_idx = report.find("完整深度报告")
     score_idx = report.find("四维评分")
-    detail_link_pos_ok = (
+    catalyst_idx = report.find("涨跌归因拆解")
+    news_brief_pos_ok = (
         news_idx >= 0
-        and detail_idx > news_idx
-        and (score_idx < 0 or detail_idx < score_idx)
-        and "👉 点击查看" in report
+        and score_idx > news_idx
+        and catalyst_idx > score_idx
     )
     print(f"钉钉资讯综合块: {'通过' if news_brief_ok else '失败'}")
-    print(f"深度报告链接位置: {'通过' if detail_link_pos_ok else '失败'}")
+    print(f"章节顺序（资讯综合→四维评分→涨跌归因）: {'通过' if news_brief_pos_ok else '失败'}")
 
     price_move = advice.get("price_move") or {}
-    web_report_ok = (
-        detail_url is not None
-        and "完整深度报告" in report
-        and "**AI 研判" not in report
-        and "【个股资讯】" not in report
-        and "涨跌归因拆解" in html
-        and "详细依据" in html
-        and "资讯解读" in html
-        and "section-catalyst" in html
+    full_modules_ok = (
+        "涨跌归因拆解" in report
+        and "详细依据" in report
+        and "资讯解读" in report
+        and "完整深度报告" not in report
+        and "【个股资讯】" in report
         and price_move.get("dimensions")
     )
     print(
-        f"网页详细报告: {'通过' if web_report_ok else '失败'}"
-        f" — url={detail_url} source={price_move.get('source')}"
+        f"钉钉完整模块: {'通过' if full_modules_ok else '失败'}"
+        f" — source={price_move.get('source')}"
     )
 
     if (
         not sections_ok or not categories_ok or not news_merge_ok
         or not trade_format_ok or not levels_ok or not layered_ok
-        or not pre_ok or not intraday_ok or not web_report_ok or not dingtalk_compact_ok
+        or not pre_ok or not intraday_ok or not full_modules_ok
         or not sat_ok or not fri_ok or not sat_dingtalk_ok or not news_brief_ok
-        or not detail_link_pos_ok
+        or not news_brief_pos_ok
     ):
         raise SystemExit(1)
 

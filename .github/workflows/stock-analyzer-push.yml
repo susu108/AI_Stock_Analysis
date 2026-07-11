@@ -30,7 +30,7 @@ env:
   TZ: Asia/Shanghai
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   push-report:
@@ -69,8 +69,6 @@ jobs:
           WEB_SEARCH_ENABLED: ${{ vars.WEB_SEARCH_ENABLED }}
           WEB_SEARCH_API_KEY: ${{ secrets.WEB_SEARCH_API_KEY }}
           STOCK_THEMES: ${{ vars.STOCK_THEMES }}
-          REPORT_WEB_ENABLED: ${{ vars.REPORT_WEB_ENABLED }}
-          REPORT_WEB_BASE_URL: ${{ vars.REPORT_WEB_BASE_URL }}
         run: |
           cat > .env << EOF
           DINGTALK_WEBHOOK=${DINGTALK_WEBHOOK}
@@ -92,14 +90,6 @@ jobs:
           WEB_SEARCH_API_KEY=${WEB_SEARCH_API_KEY}
           STOCK_THEMES=${STOCK_THEMES:-GLP-1,司美格鲁肽,多肽原料药}
           PRICE_MOVE_MIN_PCT=2.0
-          REPORT_WEB_ENABLED=${REPORT_WEB_ENABLED:-true}
-          REPORT_WEB_BASE_URL=${REPORT_WEB_BASE_URL:-}
-          REPORT_WEB_CDN=${REPORT_WEB_CDN:-ghproxy}
-          REPORT_WEB_GHPROXY=${REPORT_WEB_GHPROXY:-https://ghfast.top}
-          GITHUB_REPO=susu108/AI_Stock_Analysis
-          GITHUB_BRANCH=main
-          REPORT_WEB_OUTPUT_DIR=docs/reports
-          REPORT_WEB_RETENTION=30
           EOF
 
       - name: Resolve push_time
@@ -130,16 +120,3 @@ jobs:
             CMD+=(--push-time "$PT")
           fi
           "${CMD[@]}"
-
-      - name: Publish report to GitHub Pages
-        working-directory: .
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/reports/ || true
-          if git diff --staged --quiet; then
-            echo "No report changes to publish"
-          else
-            git commit -m "chore: update stock detail report [skip ci]"
-            git push
-          fi
