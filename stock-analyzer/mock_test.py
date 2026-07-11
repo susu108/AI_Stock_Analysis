@@ -1,0 +1,387 @@
+"""模拟数据测试 — 无需网络，验证报告格式。"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+import config
+from advisor import GenerateAdvice
+from analyzer import AnalyzeAll, MergeNewsIntoAnalysis
+from dingtalk_pusher import BuildPortfolioReportMarkdown, BuildReportMarkdown, ResolveTradeDisplayLevels
+from market_context import ResolvePredictionHorizon
+from news_analyzer import AnalyzeNewsImpact, CalcNewsScore
+from portfolio_advisor import GeneratePortfolioAdvice
+
+
+def BuildMockKline(days: int = 60) -> pd.DataFrame:
+    """构造模拟 K 线数据（与方案 §11 示例趋势一致）。"""
+    np.random.seed(42)
+    dates = pd.date_range(end=pd.Timestamp.today(), periods=days, freq="B")
+    base_price = 63.0
+    prices: list[float] = []
+    for i in range(days):
+        trend = 0.002 if i > days // 3 else 0.001
+        noise = np.random.normal(0, 0.8)
+        base_price = base_price * (1 + trend) + noise
+        base_price = max(base_price, 55.0)
+        prices.append(base_price)
+
+    closes = np.array(prices)
+    opens = closes * (1 + np.random.uniform(-0.01, 0.01, days))
+    highs = np.maximum(opens, closes) * (1 + np.random.uniform(0, 0.02, days))
+    lows = np.minimum(opens, closes) * (1 - np.random.uniform(0, 0.02, days))
+    volumes = np.random.randint(100000, 500000, days).astype(float)
+    volumes[-1] = int(volumes[-5:].mean() * 1.85)
+
+    return pd.DataFrame({
+        "日期": dates.strftime("%Y-%m-%d"),
+        "开盘": np.round(opens, 2),
+        "收盘": np.round(closes, 2),
+        "最高": np.round(highs, 2),
+        "最低": np.round(lows, 2),
+        "成交量": volumes,
+        "成交额": volumes * closes,
+        "振幅": np.round(np.random.uniform(1, 5, days), 2),
+        "涨跌幅": np.round(np.diff(closes, prepend=closes[0]) / closes * 100, 2),
+        "涨跌额": np.round(np.diff(closes, prepend=closes[0]), 2),
+        "换手率": np.round(np.random.uniform(2, 8, days), 2),
+    })
+
+
+def BuildMockFundFlow() -> pd.DataFrame:
+    """构造模拟资金流向数据。"""
+    dates = pd.date_range(end=pd.Timestamp.today(), periods=100, freq="B")
+    recent_main = [2410000, 520000, 380000, 310000, 290000]
+    recent_super = [1800000, 420000, 250000, 200000, 150000]
+    main_all = [np.random.randint(-500000, 800000) for _ in range(95)] + recent_main
+    super_all = [np.random.randint(-300000, 500000) for _ in range(95)] + recent_super
+
+    return pd.DataFrame({
+        "日期": dates.strftime("%Y-%m-%d"),
+        "主力净流入-净额": main_all,
+        "超大单净流入-净额": super_all,
+        "大单净流入-净额": [m - s for m, s in zip(main_all, super_all)],
+        "中单净流入-净额": [np.random.randint(-200000, 200000) for _ in range(100)],
+        "小单净流入-净额": [np.random.randint(-100000, 100000) for _ in range(100)],
+    })
+
+
+def BuildMockConceptBoards() -> pd.DataFrame:
+    """构造模拟概念板块数据。"""
+    names = [
+        "医疗信息化", "家用医疗", "中药", "疫苗", "口腔医疗",
+        "AI概念", "新能源", "半导体", "军工", "消费",
+        "房地产", "银行", "保险", "钢铁", "煤炭",
+        "石油", "化工", "建材", "农业", "传媒",
+    ]
+    changes = [3.89, 3.83, 3.26, 2.70, 2.32, 1.85, 1.20, 0.95, 0.60, 0.30,
+               -0.20, -0.50, -0.80, -1.10, -1.50, -1.80, -2.10, -2.50, -2.80, -3.20]
+    return pd.DataFrame({
+        "排名": range(1, len(names) + 1),
+        "板块名称": names,
+        "板块代码": [f"BK{i:04d}" for i in range(len(names))],
+        "最新价": np.random.uniform(1000, 5000, len(names)).round(2),
+        "涨跌幅": changes,
+        "涨跌额": [c * 10 for c in changes],
+        "成交量": np.random.randint(1000000, 5000000, len(names)),
+        "换手率": np.random.uniform(1, 5, len(names)).round(2),
+    })
+
+
+def BuildMockIndustryBoards() -> pd.DataFrame:
+    """构造模拟行业板块数据。"""
+    names = ["医药生物", "电子", "计算机", "机械设备", "化工",
+             "银行", "房地产", "钢铁", "煤炭", "石油石化"]
+    changes = [2.50, 2.10, 1.80, 1.20, 0.80, -0.30, -0.80, -1.50, -2.10, -2.80]
+    return pd.DataFrame({
+        "排名": range(1, len(names) + 1),
+        "板块名称": names,
+        "板块代码": [f"BK{i:04d}" for i in range(len(names))],
+        "最新价": np.random.uniform(1000, 5000, len(names)).round(2),
+        "涨跌幅": changes,
+    })
+
+
+def BuildMockRealtime() -> dict:
+    """构造模拟实时行情。"""
+    return {
+        "code": "301075",
+        "name": "多瑞生物",
+        "price": 61.67,
+        "change_pct": 1.25,
+        "change_amt": 0.78,
+        "open": 62.80,
+        "high": 64.10,
+        "low": 62.50,
+        "prev_close": 62.62,
+        "volume": 2850000,
+        "amount": 180000000,
+        "turnover": 4.32,
+        "volume_ratio": 1.85,
+        "pe": 35.6,
+        "pb": 3.28,
+        "amplitude": 2.56,
+        "total_mv": 9.15e9,
+        "circ_mv": 6.8e9,
+    }
+
+
+def BuildMockNews() -> dict[str, Any]:
+    """构造模拟多源资讯。"""
+    stock = [
+        {
+            "title": "多瑞生物：子公司获得药品注册证书",
+            "content": "公司公告子公司某产品获得药品注册证书，有望丰富产品线。",
+            "time": "2026-07-10 08:30",
+            "source": "东方财富",
+            "category": "stock",
+        },
+        {
+            "title": "多瑞医药向原控股股东借款2.8亿元补充流动资金",
+            "content": "公司借款用于补充流动资金，按LPR计息。",
+            "time": "2026-07-06 17:27",
+            "source": "财中社",
+            "category": "stock",
+        },
+    ]
+    sector = [
+        {
+            "title": "医药板块震荡走强，创新药概念受资金关注",
+            "content": "今日医药板块整体活跃，创新药、医疗器械涨幅居前。",
+            "time": "2026-07-10 09:15",
+            "source": "东方财富",
+            "category": "sector",
+        },
+        {
+            "title": "家用医疗器械需求持续增长，板块估值修复",
+            "content": "家用医疗概念多股上涨，机构看好长期空间。",
+            "time": "2026-07-10 10:00",
+            "source": "东方财富",
+            "category": "sector",
+        },
+    ]
+    policy = [
+        {
+            "title": "国家药监局发布创新药审评审批优化措施",
+            "content": "政策鼓励创新药加速上市，利好生物医药企业。",
+            "time": "20260710",
+            "source": "央视新闻",
+            "category": "policy",
+        },
+        {
+            "title": "医保目录调整方案征求意见，创新药纳入比例提升",
+            "content": "国家医保局发布目录调整征求意见稿，创新药谈判准入机制进一步优化。",
+            "time": "20260709",
+            "source": "新华社",
+            "category": "policy",
+        },
+    ]
+    macro = [
+        {
+            "title": "[中国] 6月CPI同比公布",
+            "content": "公布:0.1 预期:0.2 前值:0.0",
+            "time": "09:30",
+            "source": "经济日历",
+            "category": "macro",
+        },
+    ]
+    items = stock + sector + policy + macro
+    return {
+        "items": items,
+        "stock": stock,
+        "sector": sector,
+        "policy": policy,
+        "macro": macro,
+        "sector_keywords": ["医药", "医疗", "创新药"],
+        "sector_snapshot": [
+            "概念板块TOP5：",
+            "  - 医疗信息化 +3.89%",
+            "  - 家用医疗 +3.83%",
+        ],
+    }
+
+
+def RunPredictionHorizonTest(
+    data: dict[str, Any],
+    analysis: dict[str, Any],
+    news_bundle: dict[str, Any],
+    session_label: str,
+) -> tuple[str, dict[str, Any]]:
+    """按指定时段生成报告并返回。"""
+    horizon = ResolvePredictionHorizon(session_label)
+    advice = GenerateAdvice(
+        analysis,
+        data,
+        news_items=news_bundle["items"],
+        news_bundle=news_bundle,
+        session_label=session_label,
+        mode="daily",
+        prediction_horizon=horizon,
+    )
+    report = BuildReportMarkdown(
+        data, analysis, advice, session_label=session_label, report_mode="daily",
+    )
+    return report, advice
+
+
+def VerifyLayeredPredictions(report: str, expected_near_keyword: str) -> bool:
+    """验证三层预测结构。"""
+    return (
+        expected_near_keyword in report
+        and "短期（1~2周）" in report
+        and "长期（1~3月）" in report
+        and report.count("**操作建议**") >= 3
+    )
+
+
+def RunMockTest() -> None:
+    """运行模拟测试，打印完整 Markdown 报告。"""
+    print("=" * 60)
+    print("模拟数据测试 — 无需网络")
+    print("=" * 60)
+
+    config.POSITIONS = [
+        {"account": "账户A", "cost": 167.955, "shares": 100},
+        {"account": "账户B", "cost": 63.38, "shares": 800},
+    ]
+    config.LLM_ENABLED = False
+
+    data = {
+        "realtime": BuildMockRealtime(),
+        "kline": BuildMockKline(),
+        "concept": BuildMockConceptBoards(),
+        "industry": BuildMockIndustryBoards(),
+        "fund_flow": BuildMockFundFlow(),
+        "lhb": None,
+    }
+
+    news_bundle = AnalyzeNewsImpact(BuildMockNews(), data)
+    for item in news_bundle.get("relevant_items", []):
+        title = str(item.get("title", ""))
+        if item.get("category") == "stock" and "注册证书" in title:
+            item["impact"] = "涨"
+            item["strength"] = 4
+        elif item.get("category") == "sector" and "震荡走强" in title:
+            item["impact"] = "跌"
+            item["strength"] = 3
+    news_score, news_signals = CalcNewsScore(news_bundle.get("relevant_items", []))
+    news_bundle["news_score"] = news_score
+    news_bundle["news_signals"] = news_signals
+
+    analysis = AnalyzeAll(data)
+    base_weighted = analysis["weighted_score"]
+    analysis = MergeNewsIntoAnalysis(analysis, news_bundle)
+    advice = GenerateAdvice(
+        analysis,
+        data,
+        news_items=news_bundle["items"],
+        news_bundle=news_bundle,
+        session_label="收盘后",
+        mode="daily",
+        prediction_horizon=ResolvePredictionHorizon("收盘后"),
+    )
+    report = BuildReportMarkdown(
+        data, analysis, advice, session_label="收盘后", report_mode="daily",
+    )
+
+    print(report)
+    print("=" * 60)
+
+    price = data["realtime"]["price"]
+    buy_ok = advice["buy_high"] < price < advice["sell_low"]
+    has_portfolio_section = "持仓与回本" in report
+    stats = news_bundle.get("impact_stats", {})
+    by_cat = stats.get("by_category", {})
+    four_dim_sections = [
+        "【个股资讯】",
+        "【板块/行业】",
+        "【政策/监管】",
+        "【宏观事件】",
+    ]
+    sections_ok = all(section in report for section in four_dim_sections)
+    categories_ok = all(by_cat.get(k, 0) > 0 for k in ("stock", "sector", "policy", "macro"))
+    print(f"定价校验: 买入<{price}<卖出 → {'通过' if buy_ok else '失败'}")
+    print(f"日常报告含持仓章节: {'否（正确）' if not has_portfolio_section else '是（错误）'}")
+    print(f"相关资讯: {stats}")
+    print(f"四维分节可见: {'通过' if sections_ok else '失败'}")
+    print(f"四维分类计数: {'通过' if categories_ok else '失败'} — {by_cat}")
+    news_merge_ok = (
+        analysis.get("news_score", 0) != 0
+        and analysis.get("weighted_score") != base_weighted
+        and "资讯" in report
+        and "（15%）" in report
+    )
+    print(f"资讯面融合: {'通过' if news_merge_ok else '失败'} — news_score={analysis.get('news_score')}, weighted={analysis.get('weighted_score'):+.1f}")
+    trade_format_ok = (
+        "风险提示" in report
+        and "第一加仓（优先等待）" in report
+        and "第二加仓（次选）" in report
+        and "第一卖出（先减）" in report
+        and "第二卖出（再减）" in report
+        and "不宜加仓" in report
+        and "加仓纪律" in report
+        and "推荐价位" in report
+        and "定价说明" in report
+        and "AI定价无效" not in report
+    )
+    zones = advice.get("trade_zones") or {}
+    plan = advice.get("trade_plan") or {}
+    at1 = zones.get("add_tier1") or plan.get("add_tier1", {})
+    at2 = zones.get("add_tier2") or plan.get("add_tier2", {})
+    st1 = zones.get("sell_tier1") or plan.get("sell_tier1", {})
+    tier_order_ok = (
+        at1.get("low", 0) < at2.get("low", 0)
+        and at2.get("high", 0) < price < st1.get("low", 999)
+    )
+    levels = ResolveTradeDisplayLevels(advice)
+    levels_ok = (
+        abs(levels["s1"] - levels["buy_high"]) < 0.01
+        and abs(levels["s2"] - levels["buy_low"]) < 0.01
+        and abs(levels["r1"] - levels["sell_low"]) < 0.01
+        and abs(levels["r2"] - levels["sell_high"]) < 0.01
+        and levels["stop_loss"] < levels["s2"]
+        and tier_order_ok
+    )
+    print(f"买卖建议排版: {'通过' if trade_format_ok else '失败'}")
+    print(f"分档顺序: {'通过' if tier_order_ok else '失败'} — "
+          f"加一={at1.get('low')}~{at1.get('high')} 加二={at2.get('low')}~{at2.get('high')}")
+    print(f"支撑压力一致性: {'通过' if levels_ok else '失败'} — S1={levels['s1']} S2={levels['s2']} stop={levels['stop_loss']}")
+    layered_ok = (
+        "综合预测" in report
+        and VerifyLayeredPredictions(report, "明日预测")
+        and advice.get("predictions", {}).get("near_term")
+        and advice.get("predictions", {}).get("short_term")
+        and advice.get("predictions", {}).get("long_term")
+    )
+    print(f"分层综合预测: {'通过' if layered_ok else '失败'}")
+
+    report_pre, _ = RunPredictionHorizonTest(
+        data, analysis, news_bundle, "开盘前",
+    )
+    pre_ok = VerifyLayeredPredictions(report_pre, "明日预测")
+    report_intraday, _ = RunPredictionHorizonTest(
+        data, analysis, news_bundle, "下午盘中",
+    )
+    intraday_ok = VerifyLayeredPredictions(report_intraday, "今日预测")
+    print(f"开盘前Horizon: {'通过' if pre_ok else '失败'}")
+    print(f"盘中Horizon: {'通过' if intraday_ok else '失败'}")
+
+    if (
+        not sections_ok or not categories_ok or not news_merge_ok
+        or not trade_format_ok or not levels_ok or not layered_ok
+        or not pre_ok or not intraday_ok
+    ):
+        raise SystemExit(1)
+
+    portfolio_advice = GeneratePortfolioAdvice(data, analysis)
+    print("\n--- 持仓专报预览 ---")
+    print(BuildPortfolioReportMarkdown(portfolio_advice))
+    print("=" * 60)
+    print("模拟测试完成")
+
+
+if __name__ == "__main__":
+    RunMockTest()
