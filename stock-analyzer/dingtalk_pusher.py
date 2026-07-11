@@ -200,12 +200,13 @@ def _BuildDetailedReasonsSection(advice: dict[str, Any]) -> list[str]:
     lines: list[str] = [
         "",
         "**买入依据**",
+        "",
     ]
     lines.extend(_BuildNumberedBulletItems(
         advice.get("buy_reasons", []),
         "暂无明确买入信号",
     ))
-    lines.extend(["", "**卖出依据**"])
+    lines.extend(["", "**卖出依据**", ""])
     lines.extend(_BuildNumberedBulletItems(
         advice.get("sell_reasons", []),
         "暂无明确卖出信号",
@@ -570,11 +571,11 @@ def _FormatNewsItemBlock(
 
     reason = str(item.get("impact_reason", "")).strip()
     if reason:
-        lines.append(f"- **影响** {reason}")
+        lines.append(f"  - **影响** {reason}")
 
     content = str(item.get("content", "")).strip()
     if content:
-        lines.append(f"- **摘要** {_TruncateText(content, _ContentMaxLen(cat))}")
+        lines.append(f"  - **摘要** {_TruncateText(content, _ContentMaxLen(cat))}")
 
     return lines
 
@@ -694,7 +695,7 @@ def _BuildNewsInterpretationSection(
     neutral = [i for i in relevant_items if i.get("impact") == "中性"]
 
     if news_summary or sector_impact or policy_impact or news_impact:
-        lines.extend([f"**AI 研判{ai_tag}**"])
+        lines.extend([f"**AI 研判{ai_tag}**", ""])
         if news_summary:
             lines.append(f"- {news_summary[:200]}")
         impacts: list[tuple[str, str]] = []
@@ -713,6 +714,7 @@ def _BuildNewsInterpretationSection(
         lines.extend([
             "",
             "**采集统计**",
+            "",
             f"- **总量** 共采集 **{stats.get('total', 0)}** 条",
             f"- **分类** 个股 **{by_category.get('stock', 0)}**  "
             f"板块 **{by_category.get('sector', 0)}**  "
@@ -1148,7 +1150,7 @@ def _BuildPriceMoveSection(
             section_title = f'<font color="#E53935">{section_title}</font>' if direction == "涨" else (
                 f'<font color="#43A047">{section_title}</font>' if direction == "跌" else section_title
             )
-        lines.extend(["", section_title])
+        lines.extend(["", section_title, ""])
 
         points = dim.get("points") or []
         if not points:
@@ -1173,7 +1175,7 @@ def _BuildPriceMoveSection(
 
     gaps = price_move.get("evidence_gaps") or []
     if gaps:
-        lines.extend(["", "**证据缺口**"])
+        lines.extend(["", "**证据缺口**", ""])
         for gap in gaps[:5]:
             lines.append(f"- {gap}")
 
@@ -1198,7 +1200,6 @@ def BuildDetailSectionsMarkdown(
     change_pct = rt.get("change_pct", 0)
     ai_tag = "（AI）" if advice.get("llm_used") else ""
     lines: list[str] = [
-        f"# {config.STOCK_NAME}({config.STOCK_CODE}) 深度报告",
         f"> {NowStr()} ｜ {session_label}",
         "",
     ]

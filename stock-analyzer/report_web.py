@@ -20,6 +20,41 @@ _DISCLAIMER = (
 )
 
 
+def PrepareWebMarkdown(markdown_body: str) -> str:
+    """将钉钉风格 Markdown 预处理为更适合网页渲染的格式。"""
+    lines = markdown_body.split("\n")
+    result: list[str] = []
+    skip_header = True
+
+    for line in lines:
+        stripped = line.strip()
+
+        if skip_header:
+            if not stripped:
+                continue
+            if stripped.startswith("# ") or (
+                stripped.startswith("> ") and "｜" in stripped
+            ):
+                continue
+            skip_header = False
+
+        prev = result[-1].strip() if result else ""
+        if (
+            stripped.startswith("- ")
+            and prev
+            and not prev.startswith("- ")
+            and not prev.startswith("*")
+            and not prev.startswith("<h")
+            and prev != "---"
+            and result[-1] != ""
+        ):
+            result.append("")
+
+        result.append(line)
+
+    return "\n".join(result)
+
+
 def BuildReportFileName(
     stock_code: str,
     session_label: str,
@@ -69,7 +104,7 @@ def RenderDetailReportHtml(
             pct_badge = ""
 
     body_html = markdown.markdown(
-        markdown_body,
+        PrepareWebMarkdown(markdown_body),
         extensions=["extra", "nl2br", "sane_lists"],
         output_format="html5",
     )
@@ -153,8 +188,17 @@ def RenderDetailReportHtml(
       font-size: 1.15rem;
     }}
     main h2:first-child {{ border-top: none; margin-top: 0; }}
-    main ul, main ol {{ padding-left: 1.25rem; }}
+    main h2 + ul {{ margin-top: 8px; }}
+    main ul, main ol {{ padding-left: 1.25rem; margin: 8px 0 16px; }}
     main li {{ margin: 6px 0; }}
+    main li ul {{ margin-top: 4px; margin-bottom: 4px; }}
+    main p {{ margin: 10px 0; }}
+    main p > strong:first-child {{
+      display: block;
+      margin: 16px 0 8px;
+      font-size: 1.02rem;
+    }}
+    main font {{ font-size: inherit; }}
     main blockquote {{
       margin: 12px 0;
       padding: 8px 12px;
