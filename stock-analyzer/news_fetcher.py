@@ -6,7 +6,7 @@ import functools
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Callable, TypeVar
 
 import akshare as ak
@@ -20,16 +20,19 @@ logger = SetupLogger(config.LOG_LEVEL)
 F = TypeVar("F", bound=Callable[..., Any])
 
 _CONTENT_MAX_LEN = 300
+_CONTENT_MAX_LEN_POLICY = 600
 _STOCK_LIMIT = 10
 _SECTOR_LIMIT = 8
-_POLICY_LIMIT = 6
+_POLICY_LIMIT = 10
 _MACRO_LIMIT = 5
+_CCTV_LOOKBACK_DAYS = 3
 
 _DEFAULT_SECTOR_KEYWORDS = ("医药", "医疗", "生物", "制药", "创新药", "疫苗", "医疗器械")
 _POLICY_KEYWORDS = (
     "政策", "国务院", "央行", "证监会", "医保", "药监", "监管",
     "发展改革", "财政", "关税", "降息", "降准", "集采", "带量采购",
     "创新", "审批", "注册", "上市", "印发", "通知", "意见", "办法",
+    "基药目录", "国谈", "GLP-1", "司美格鲁肽", "替尔泊肽", "公告",
 )
 _POLICY_EXCLUDE = ("欢迎", "会谈", "访问", "仪式", "会见", "致电", "贺电")
 
@@ -70,11 +73,13 @@ def _MakeNewsItem(
     source: str,
     category: str,
     url: str = "",
+    content_max_len: int | None = None,
 ) -> dict[str, str]:
     """构造标准化资讯条目。"""
+    max_len = content_max_len if content_max_len is not None else _CONTENT_MAX_LEN
     text = content.strip()
-    if len(text) > _CONTENT_MAX_LEN:
-        text = text[:_CONTENT_MAX_LEN] + "..."
+    if len(text) > max_len:
+        text = text[:max_len] + "..."
     return {
         "title": title.strip(),
         "content": text,
@@ -148,13 +153,30 @@ def FetchGlobalNews() -> pd.DataFrame | None:
 
 
 @_Retry(max_retries=2, delay=2)
-def FetchCctvNews() -> pd.DataFrame | None:
-    """获取央视新闻（含政策类）。"""
-    today = date.today().strftime("%Y%m%d")
-    df = ak.news_cctv(date=today)
+def FetchCctvNews(day: date | None = None) -> pd.DataFrame | None:
+    """获取指定日期央视新闻（含政策类）。"""
+    target = day or date.today()
+    day_str = target.strftime("%Y%m%d")
+    df = ak.news_cctv(date=day_str)
     if df is None or df.empty:
         return None
     return df
+
+
+def FetchCctvNewsMultiDay(days: int = _CCTV_LOOKBACK_DAYS) -> pd.DataFrame | None:
+    """回溯多日央视新闻并合并。"""
+    frames: list[pd.DataFrame] = []
+    today = date.today()
+    for offset in range(days):
+        target = today - timedelta(days=offset)
+        df = FetchCctvNews(target)
+        if df is not None and not df.empty:
+            copy = df.copy()
+            copy["_fetch_date"] = target.strftime("%Y%m%d")
+            frames.append(copy)
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
 
 
 @_Retry(max_retries=2, delay=2)
@@ -244,9 +266,10 @@ def FilterPolicyNews(
                 items.append(_MakeNewsItem(
                     title=title,
                     content=str(row.get("content", "")),
-                    pub_time=str(row.get("date", "")),
+                    pub_time=str(row.get("date", row.get("_fetch_date", ""))),
                     source="央视新闻",
                     category="policy",
+                    content_max_len=_CONTENT_MAX_LEN_POLICY,
                 ))
 
     if global_df is not None and not global_df.empty and len(items) < limit:
@@ -267,6 +290,7 @@ def FilterPolicyNews(
                 source="东方财富",
                 category="policy",
                 url=str(row.get("链接", "")),
+                content_max_len=_CONTENT_MAX_LEN_POLICY,
             ))
 
     return items[:limit]
@@ -311,9 +335,11 @@ def NormalizeMacroEvents(df: pd.DataFrame | None, limit: int) -> list[dict[str, 
 
 def FetchNews(data: dict[str, Any] | None = None) -> dict[str, Any]:
     """实时采集多源资讯并分类返回（无缓存，每次调用重新拉取）。"""
+    from web_search_fetcher import SearchPolicyAndThemeNews
+
     fetched_at = NowStr()
     logger.info(
-        "开始实时采集 %s 综合资讯（个股/板块/政策/宏观）— %s",
+        "开始实时采集 %s 综合资讯（个股/板块/政策/宏观/联网）— %s",
         config.STOCK_NAME,
         fetched_at,
     )
@@ -329,7 +355,7 @@ def FetchNews(data: dict[str, Any] | None = None) -> dict[str, Any]:
     tasks = {
         "stock": FetchStockNews,
         "global": FetchGlobalNews,
-        "cctv": FetchCctvNews,
+        "cctv": FetchCctvNewsMultiDay,
         "macro": FetchMacroCalendar,
     }
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -354,23 +380,31 @@ def FetchNews(data: dict[str, Any] | None = None) -> dict[str, Any]:
     policy_items = FilterPolicyNews(cctv_df, global_df, _POLICY_LIMIT)
     macro_items = NormalizeMacroEvents(macro_df, _MACRO_LIMIT)
 
+    web_search_items: list[dict[str, str]] = []
+    try:
+        web_search_items = SearchPolicyAndThemeNews()
+    except Exception as exc:
+        logger.warning("联网搜索资讯采集异常: %s", exc)
+
     categories = {
         "stock": stock_items,
         "sector": sector_items,
         "policy": policy_items,
         "macro": macro_items,
+        "web_search": web_search_items,
     }
     for cat, items in categories.items():
-        if not items:
+        if not items and cat != "web_search":
             logger.warning("资讯类别 %s 本次未采集到数据", cat)
 
-    all_items = stock_items + sector_items + policy_items + macro_items
+    all_items = stock_items + sector_items + policy_items + macro_items + web_search_items
     bundle: dict[str, Any] = {
         "items": all_items,
         "stock": stock_items,
         "sector": sector_items,
         "policy": policy_items,
         "macro": macro_items,
+        "web_search": web_search_items,
         "sector_keywords": sector_keywords,
         "sector_snapshot": sector_snapshot,
         "fetched_at": fetched_at,
@@ -380,11 +414,12 @@ def FetchNews(data: dict[str, Any] | None = None) -> dict[str, Any]:
 
     counts = bundle["category_counts"]
     logger.info(
-        "实时资讯采集完成 — 个股:%d 板块:%d 政策:%d 宏观:%d 合计:%d ｜ %s",
-        counts["stock"],
-        counts["sector"],
-        counts["policy"],
-        counts["macro"],
+        "实时资讯采集完成 — 个股:%d 板块:%d 政策:%d 宏观:%d 联网:%d 合计:%d ｜ %s",
+        counts.get("stock", 0),
+        counts.get("sector", 0),
+        counts.get("policy", 0),
+        counts.get("macro", 0),
+        counts.get("web_search", 0),
         len(all_items),
         fetched_at,
     )

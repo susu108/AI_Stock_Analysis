@@ -73,12 +73,23 @@ def BuildAnalysisContext(
         f"推送时段：{session_label}",
     ]
     horizon = base_advice.get("prediction_horizon") or ResolvePredictionHorizon(session_label)
+    is_trading_day = horizon.get("is_trading_day", True)
     context_parts.extend([
         "",
         "【预测Horizon】",
         f"- 当前时段：{horizon.get('session_label', session_label)}",
         f"- 近端预测目标：{horizon.get('near_term_target', '')}（{horizon.get('near_term_label', '')}）",
         f"- 市场是否开盘：{'是' if horizon.get('is_market_open') else '否'}",
+        f"- 是否交易日：{'是' if is_trading_day else '否'}",
+    ])
+    if not is_trading_day:
+        next_date = horizon.get("next_trading_date", "")
+        context_parts.extend([
+            "- 近端预测说明：当前为非交易日，near_term 必须针对下一交易日"
+            "（含休市期间政策/公告/板块资讯对开盘及首日走势的影响），禁止预测「今日」",
+            f"- 下一交易日：{next_date}",
+        ])
+    context_parts.extend([
         "- 要求：近端/短期/长期三层预测均须综合K线技术面信号与全部有影响资讯",
         "",
         "【实时行情】",
@@ -259,15 +270,17 @@ def _BuildSystemPrompt(mode: str = "daily") -> str:
         f"须综合全部利好/利空/政策/板块资讯，给出对{stock}短期操作的明确结论与注意事项）。"
         "分析原则："
         "1. 近端/短期/长期三层预测与买卖建议必须综合K线信号与有影响资讯；"
-        "2. 开盘前/收盘后：near_term 针对下一交易日；盘中：near_term 针对今日剩余时段至收盘；"
-        "3. 第一加仓=深支撑/箱体中枢（优先等待），第二加仓=浅回调/VWAP（次选，限制更严）；"
-        "4. 须输出 risk_warning、四档参考区间及 logic/rules/stop、每档 _best 最推荐单点价、no_add_zones、trade_discipline；"
-        "5. buy/sell 四价为包络：buy_price_low=add_tier1_low，buy_price_high=add_tier2_high；"
-        "6. 定价须优先参考【技术锚点】箱体/VWAP/关键支撑/禁加线/做T压力；"
-        "7. 第一加仓 best 应贴近箱体中枢/深支撑承接位，勿简单取区间中点；区间过宽时 best 为实际操作价；"
-        "8. 结合资讯判断题材属性与利空场景（如利空低开放弃加仓）；股数建议写在 rules 中；"
-        "9. 理由必须引用提供的数据，不要编造；"
-        "10. 仅输出 JSON，不要有其他文字。"
+        "2. 开盘前/收盘后/非交易日：near_term 针对下一交易日；盘中：near_term 针对今日剩余时段至收盘；"
+        "3. 非交易日须结合休市期间政策/公告/板块资讯预判下一交易日开盘及首日走势；"
+        "4. news_score 不为 0 时，near_term_prediction/strategy/buy_reasons 至少引用一条资讯或政策要点，不可纯 K 线；"
+        "5. 第一加仓=深支撑/箱体中枢（优先等待），第二加仓=浅回调/VWAP（次选，限制更严）；"
+        "6. 须输出 risk_warning、四档参考区间及 logic/rules/stop、每档 _best 最推荐单点价、no_add_zones、trade_discipline；"
+        "7. buy/sell 四价为包络：buy_price_low=add_tier1_low，buy_price_high=add_tier2_high；"
+        "8. 定价须优先参考【技术锚点】箱体/VWAP/关键支撑/禁加线/做T压力；"
+        "9. 第一加仓 best 应贴近箱体中枢/深支撑承接位，勿简单取区间中点；区间过宽时 best 为实际操作价；"
+        "10. 结合资讯判断题材属性与利空场景（如利空低开放弃加仓）；股数建议写在 rules 中；"
+        "11. 理由必须引用提供的数据，不要编造；"
+        "12. 仅输出 JSON，不要有其他文字。"
     )
 
 

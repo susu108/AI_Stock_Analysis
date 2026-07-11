@@ -7,7 +7,9 @@ from typing import Any
 
 from llm_advisor import EnhanceAdviceWithLlm
 from market_context import ResolvePredictionHorizon
+from move_context import BuildMoveContext
 from price_context import BuildPriceContext, ExtractRecentPriceLevels
+from price_move_analyzer import AnalyzePriceMove
 from trade_zones import BuildRuleTradePlan, EnvelopeFromTradeZones
 from utils import SetupLogger
 import config
@@ -312,6 +314,11 @@ def GenerateAdvice(
         "rule_r2": sr["r2"],
         "prediction_horizon": prediction_horizon or ResolvePredictionHorizon(session_label),
     }
+
+    move_context = BuildMoveContext(data, analysis, news_bundle)
+    price_move = AnalyzePriceMove(move_context)
+    base_advice["move_context"] = move_context
+    base_advice["price_move"] = price_move
 
     return EnhanceAdviceWithLlm(
         analysis,

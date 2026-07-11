@@ -549,6 +549,48 @@ def GetLhb(days: int = 5) -> pd.DataFrame | None:
     return filtered.reset_index(drop=True)
 
 
+@_Retry(max_retries=3, delay=2)
+def GetMarginDetail() -> dict[str, Any] | None:
+    """获取个股融资融券近端数据。"""
+    try:
+        df = ak.stock_margin_detail_em(symbol=config.STOCK_CODE)
+        if df is None or df.empty:
+            return None
+        tail = df.tail(5).reset_index(drop=True)
+        latest = tail.iloc[-1]
+        prev = tail.iloc[-2] if len(tail) >= 2 else latest
+
+        balance_col = next(
+            (c for c in df.columns if "融资余额" in str(c)),
+            None,
+        )
+        buy_col = next(
+            (c for c in df.columns if "融资买入" in str(c)),
+            None,
+        )
+        if balance_col is None:
+            return None
+
+        latest_balance = _ParseChineseAmount(latest.get(balance_col))
+        prev_balance = _ParseChineseAmount(prev.get(balance_col))
+        change = latest_balance - prev_balance if prev_balance > 0 else 0.0
+        latest_buy = _ParseChineseAmount(latest.get(buy_col)) if buy_col else 0.0
+
+        date_col = next((c for c in df.columns if "日期" in str(c)), None)
+        trade_date = str(latest.get(date_col, "")) if date_col else ""
+
+        return {
+            "margin_balance": latest_balance,
+            "margin_balance_prev": prev_balance,
+            "margin_balance_change": change,
+            "margin_buy": latest_buy,
+            "trade_date": trade_date,
+        }
+    except Exception as exc:
+        logger.warning("融资融券数据采集失败: %s", exc)
+        return None
+
+
 def FetchAllData() -> dict[str, Any]:
     """采集所有数据：新浪/龙虎榜并行，同花顺相关串行（避免 MiniRacer 线程冲突）。"""
     logger.info("开始采集 %s(%s) 数据...", config.STOCK_NAME, config.STOCK_CODE)
@@ -563,6 +605,7 @@ def FetchAllData() -> dict[str, Any]:
         "concept": GetConceptBoards,
         "industry": GetIndustryBoards,
         "fund_flow": GetFundFlow,
+        "margin": GetMarginDetail,
     }
 
     with ThreadPoolExecutor(max_workers=3) as executor:
@@ -588,5 +631,5 @@ def FetchAllData() -> dict[str, Any]:
     )
 
     success_count = sum(1 for v in data.values() if v is not None)
-    logger.info("数据采集完成，成功 %d/6 项", success_count)
+    logger.info("数据采集完成，成功 %d/7 项", success_count)
     return data

@@ -1,14 +1,14 @@
 # 股票分析钉钉定时推送（GitHub Actions）
-# 北京时间 09:00 / 11:30 / 14:30，仅工作日运行；非交易日由程序内 IsTradingDay 跳过
+# 北京时间 09:00 / 11:30 / 14:30，每日触发（含周末与法定节假日）
 
 name: Stock Analyzer Push
 
 on:
   schedule:
     # UTC = 北京时间 - 8
-    - cron: "0 1 * * 1-5"   # 09:00 开盘前
-    - cron: "30 3 * * 1-5"  # 11:30 午盘
-    - cron: "30 6 * * 1-5"  # 14:30 尾盘
+    - cron: "0 1 * * *"   # 09:00 开盘前
+    - cron: "30 3 * * *"  # 11:30 午盘
+    - cron: "30 6 * * *"  # 14:30 尾盘
   workflow_dispatch:
     inputs:
       push_time:
@@ -21,14 +21,12 @@ on:
           - "09:00"
           - "11:30"
           - "14:30"
-      force_trading_day:
-        description: "手动触发时忽略交易日校验（测试用）"
-        required: false
-        default: false
-        type: boolean
 
 env:
   TZ: Asia/Shanghai
+
+permissions:
+  contents: write
 
 jobs:
   push-report:
@@ -64,6 +62,11 @@ jobs:
           STOCK_NAME: ${{ vars.STOCK_NAME }}
           STOCK_MARKET: ${{ vars.STOCK_MARKET }}
           LLM_ENABLED: ${{ vars.LLM_ENABLED }}
+          WEB_SEARCH_ENABLED: ${{ vars.WEB_SEARCH_ENABLED }}
+          WEB_SEARCH_API_KEY: ${{ secrets.WEB_SEARCH_API_KEY }}
+          STOCK_THEMES: ${{ vars.STOCK_THEMES }}
+          REPORT_WEB_ENABLED: ${{ vars.REPORT_WEB_ENABLED }}
+          REPORT_WEB_BASE_URL: ${{ vars.REPORT_WEB_BASE_URL }}
         run: |
           cat > .env << EOF
           DINGTALK_WEBHOOK=${DINGTALK_WEBHOOK}
@@ -80,6 +83,15 @@ jobs:
           DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
           DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
           POSITIONS=${POSITIONS:-[]}
+          WEB_SEARCH_ENABLED=${WEB_SEARCH_ENABLED:-false}
+          WEB_SEARCH_PROVIDER=tavily
+          WEB_SEARCH_API_KEY=${WEB_SEARCH_API_KEY}
+          STOCK_THEMES=${STOCK_THEMES:-GLP-1,司美格鲁肽,多肽原料药}
+          PRICE_MOVE_MIN_PCT=2.0
+          REPORT_WEB_ENABLED=${REPORT_WEB_ENABLED:-true}
+          REPORT_WEB_BASE_URL=${REPORT_WEB_BASE_URL}
+          REPORT_WEB_OUTPUT_DIR=docs/reports
+          REPORT_WEB_RETENTION=30
           EOF
 
       - name: Resolve push_time
@@ -91,21 +103,30 @@ jobs:
             exit 0
           fi
           case "${{ github.event.schedule }}" in
-            "0 1 * * 1-5")  echo "push_time=09:00" >> "$GITHUB_OUTPUT" ;;
-            "30 3 * * 1-5") echo "push_time=11:30" >> "$GITHUB_OUTPUT" ;;
-            "30 6 * * 1-5") echo "push_time=14:30" >> "$GITHUB_OUTPUT" ;;
-            *)              echo "push_time=" >> "$GITHUB_OUTPUT" ;;
+            "0 1 * * *")  echo "push_time=09:00" >> "$GITHUB_OUTPUT" ;;
+            "30 3 * * *") echo "push_time=11:30" >> "$GITHUB_OUTPUT" ;;
+            "30 6 * * *") echo "push_time=14:30" >> "$GITHUB_OUTPUT" ;;
+            *)             echo "push_time=" >> "$GITHUB_OUTPUT" ;;
           esac
 
       - name: Run daily analysis and push
         run: |
           PT="${{ steps.resolve_time.outputs.push_time }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.force_trading_day }}" = "true" ]; then
-            CMD=(python main.py --now)
-          else
-            CMD=(python main.py --scheduled)
-          fi
+          CMD=(python main.py --scheduled)
           if [ -n "$PT" ]; then
             CMD+=(--push-time "$PT")
           fi
           "${CMD[@]}"
+
+      - name: Publish report to GitHub Pages
+        working-directory: .
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/reports/ || true
+          if git diff --staged --quiet; then
+            echo "No report changes to publish"
+          else
+            git commit -m "chore: update stock detail report [skip ci]"
+            git push
+          fi

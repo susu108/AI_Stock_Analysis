@@ -16,7 +16,7 @@ logger = SetupLogger(config.LOG_LEVEL)
 
 _LLM_TIMEOUT = 90
 _VALID_IMPACTS = frozenset({"涨", "跌", "中性", "无关"})
-_CATEGORY_GUARDS = frozenset({"sector", "policy", "macro"})
+_CATEGORY_GUARDS = frozenset({"sector", "policy", "macro", "web_search"})
 _IRRELEVANT_KEYWORDS = (
     "国事访问", "欢迎.*访华", "会谈", "会见", "仪式", "致电", "贺电",
     "NBA", "英超", "世界杯",
@@ -34,7 +34,8 @@ def _BuildNewsScoringPrompt(stock_name: str, stock_code: str) -> str:
         f"1. stock（个股）：直接涉及 {stock_name}/{stock_code}；"
         "2. sector（板块）：涉及医药/医疗/CRO/仿制药/医疗器械等板块，对个股有间接影响即 relevant=true；"
         "3. policy（政策）：涉及药监/医保/国务院/证监会/A股监管政策，即 relevant=true；"
-        "4. macro（宏观）：中国宏观数据（CPI/PMI/利率等）影响市场流动性，即 relevant=true。"
+        "4. macro（宏观）：中国宏观数据（CPI/PMI/利率等）影响市场流动性，即 relevant=true；"
+        "5. web_search（联网）：政策/题材/涨跌原因相关搜索结果，与 policy 同级判定。"
         "重要：板块/政策/宏观不可仅因未直接提及股票代码就标为无关，"
         "应评估对医药板块及个股的间接影响，可标 impact=中性。"
         "relevant=false 或 impact=无关 仅用于与医药/A股完全无关的内容。"
@@ -158,6 +159,8 @@ def _ApplyRuleFallback(items: list[dict[str, str]]) -> list[dict[str, Any]]:
             strength = 2
         elif cat == "policy":
             strength = 2
+        elif cat == "web_search":
+            strength = 3
         else:
             strength = 1
         clearly_irrelevant = _IsClearlyIrrelevant(
@@ -225,7 +228,7 @@ def GetImpactfulItems(scored_items: list[dict[str, Any]]) -> list[dict[str, Any]
 
 def _CountByCategory(items: list[dict[str, Any]]) -> dict[str, int]:
     """按类别统计相关资讯数量。"""
-    counts = {"stock": 0, "sector": 0, "policy": 0, "macro": 0}
+    counts = {"stock": 0, "sector": 0, "policy": 0, "macro": 0, "web_search": 0}
     for item in items:
         cat = str(item.get("category", "stock"))
         if cat in counts:
@@ -236,6 +239,7 @@ def _CountByCategory(items: list[dict[str, Any]]) -> dict[str, int]:
 _CATEGORY_SCORE_WEIGHT: dict[str, float] = {
     "stock": 1.0,
     "policy": 0.85,
+    "web_search": 0.85,
     "sector": 0.7,
     "macro": 0.5,
 }
@@ -244,6 +248,7 @@ _CATEGORY_LABEL: dict[str, str] = {
     "stock": "个股",
     "sector": "板块",
     "policy": "政策",
+    "web_search": "联网",
     "macro": "宏观",
 }
 
@@ -340,7 +345,7 @@ def AnalyzeNewsImpact(
     }
 
     logger.info(
-        "资讯影响分析 — 有关:%d 涨/跌:%d 无关:%d ｜ 个股:%d 板块:%d 政策:%d 宏观:%d ｜ 资讯面:%+.1f",
+        "资讯影响分析 — 有关:%d 涨/跌:%d 无关:%d ｜ 个股:%d 板块:%d 政策:%d 宏观:%d 联网:%d ｜ 资讯面:%+.1f",
         len(relevant),
         len(impactful),
         irrelevant_count,
@@ -348,6 +353,7 @@ def AnalyzeNewsImpact(
         by_category.get("sector", 0),
         by_category.get("policy", 0),
         by_category.get("macro", 0),
+        by_category.get("web_search", 0),
         news_score,
     )
     return news_bundle

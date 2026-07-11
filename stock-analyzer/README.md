@@ -32,8 +32,52 @@ python main.py --portfolio
 | `POSITIONS` | 分账户持仓 JSON | 见 .env.example |
 | `MANUAL_RUN` | true=立即日常分析 | true |
 | `LLM_ENABLED` | 是否启用大模型 | true |
+| `WEB_SEARCH_ENABLED` | 是否启用联网搜索（涨跌归因） | false |
+| `WEB_SEARCH_PROVIDER` | 搜索 Provider：`tavily` / `serper` | tavily |
+| `WEB_SEARCH_API_KEY` | Tavily 或 Serper API Key | 可选 |
+| `STOCK_THEMES` | 个股题材词（逗号分隔，用于搜索） | 空 |
+| `PRICE_MOVE_MIN_PCT` | 涨跌幅低于该值输出简版归因 | 2.0 |
+| `REPORT_WEB_ENABLED` | 是否生成网页详细报告并在钉钉附链接 | true |
+| `REPORT_WEB_BASE_URL` | GitHub Pages 报告根 URL | 空 |
+| `REPORT_WEB_OUTPUT_DIR` | HTML 输出目录（相对仓库根） | docs/reports |
+| `REPORT_WEB_RETENTION` | 保留历史报告份数 | 30 |
 
-## 两种推送模式
+## 涨跌归因拆解
+
+**涨跌归因拆解、详细依据、资讯解读** 发布在网页详细报告中；钉钉推送精简版，并附链接：
+
+```markdown
+- **完整深度报告** [涨跌归因 · 详细依据 · 资讯解读](https://你的用户名.github.io/AI_Stock_Analysis/reports/latest.html)
+```
+
+网页报告五维涨跌归因（对标豆包粒度）：
+
+1. **核心直接催化** — 政策/资讯 + 题材匹配
+2. **板块资金共振** — 板块领涨、高低切换
+3. **技术面超跌修复** — 箱体破位、压力转换
+4. **市场情绪与筹码** — 量能、小盘优势、融资盘
+5. **关键利空/隐患** — 利好兑现、套牢区、杠杆抛压
+
+启用联网搜索可补全官方政策细节（如基药目录、具体药品）：
+
+```env
+WEB_SEARCH_ENABLED=true
+WEB_SEARCH_PROVIDER=tavily
+WEB_SEARCH_API_KEY=tvly-xxx
+STOCK_THEMES=GLP-1,司美格鲁肽,多肽原料药
+```
+
+[Tavily](https://tavily.com/) 或 [Serper](https://serper.dev/) 注册获取 API Key。
+
+## 网页详细报告（GitHub Pages）
+
+1. 仓库 **Settings → Pages → Build and deployment → Branch: main → Folder: /docs**
+2. Actions Variables 设置：
+   - `REPORT_WEB_ENABLED=true`
+   - `REPORT_WEB_BASE_URL=https://<用户名>.github.io/<仓库名>/reports`
+3. 每次推送后 Actions 自动将 HTML 写入 `docs/reports/` 并 commit
+
+本地调试时 `REPORT_WEB_BASE_URL` 留空仍会生成 `docs/reports/latest.html`，但不会出现在钉钉链接中。
 
 ### 日常分析（默认）
 
@@ -41,9 +85,9 @@ python main.py --portfolio
 python main.py --now
 ```
 
-- 实时行情 + 三维度评分
+- 实时行情 + 三维度评分 + 买卖建议（精简版）
+- 钉钉附 **网页深度报告** 链接（涨跌归因 / 详细依据 / 资讯解读）
 - 资讯 AI 过滤，突出涨/跌影响
-- 政策/监管资讯完整展示
 - **不含**持仓、回本、做T建议
 - 报告末尾提示如何获取持仓建议
 
@@ -94,9 +138,14 @@ git push -u origin main
 | Secret | `DINGTALK_WEBHOOK` | 钉钉 Webhook（必填） |
 | Secret | `DINGTALK_SECRET` | 加签密钥（可选） |
 | Secret | `DEEPSEEK_API_KEY` | DeepSeek API Key |
+| Secret | `WEB_SEARCH_API_KEY` | Tavily/Serper Key（涨跌归因联网搜索，可选） |
 | Secret | `POSITIONS` | 持仓 JSON（仅 `--portfolio` 需要，日常推送可留空 `[]`） |
 | Variable | `STOCK_CODE` | 可选，默认 301075 |
 | Variable | `STOCK_NAME` | 可选，默认 多瑞生物 |
+| Variable | `STOCK_THEMES` | 可选，如 `GLP-1,司美格鲁肽,多肽原料药` |
+| Variable | `WEB_SEARCH_ENABLED` | 可选，`true` 启用联网搜索 |
+| Variable | `REPORT_WEB_ENABLED` | 可选，`true` 生成网页报告 |
+| Variable | `REPORT_WEB_BASE_URL` | 可选，GitHub Pages 报告 URL 前缀 |
 | Variable | `LLM_ENABLED` | 可选，`true` / `false` |
 
 ### 3. 调度时间
@@ -109,11 +158,11 @@ git push -u origin main
 | 11:30 | 午盘 |
 | 14:30 | 尾盘 |
 
-仅周一到周五触发；法定节假日会在程序内 `IsTradingDay` 自动跳过。
+每日三个时间点触发（含周末与法定节假日）。
 
 ### 4. 手动测试
 
-GitHub 仓库 **Actions → Stock Analyzer Push → Run workflow**，可选推送时刻或勾选「忽略交易日」做测试。
+GitHub 仓库 **Actions → Stock Analyzer Push → Run workflow**，可选推送时刻做测试。
 
 本地等价命令：
 

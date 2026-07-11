@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from datetime import date, datetime
+from datetime import datetime
 
 import schedule
 
@@ -14,11 +14,11 @@ from advisor import GenerateAdvice
 from analyzer import AnalyzeAll, MergeNewsIntoAnalysis
 from data_fetcher import FetchAllData
 from dingtalk_pusher import PushErrorNotice, PushPortfolioReport, PushReport
-from market_context import ResolvePredictionHorizon
+from market_context import ResolveSessionAndHorizon
 from news_analyzer import AnalyzeNewsImpact
 from news_fetcher import FetchNews, FlattenNewsItems
 from portfolio_advisor import GeneratePortfolioAdvice
-from utils import IsTradingDay, NowStr, SetupLogger
+from utils import NowStr, SetupLogger
 
 logger = SetupLogger(config.LOG_LEVEL)
 
@@ -47,7 +47,7 @@ def ParseArgs() -> argparse.Namespace:
     parser.add_argument(
         "--scheduled",
         action="store_true",
-        help="执行一次日常推送（校验交易日，供 GitHub Actions 等外部调度）",
+        help="执行一次日常推送（供 GitHub Actions 等外部调度，含非交易日）",
     )
     parser.add_argument(
         "--push-time",
@@ -82,11 +82,6 @@ def Job(
     force_run: bool = False,
 ) -> None:
     """执行一次日常实时分析推送（不含持仓）。"""
-    today = date.today()
-    if not force_run and not IsTradingDay(today):
-        logger.info("今日 %s 非交易日，定时任务跳过（手动请用: python main.py --now）", today)
-        return
-
     label = session_label or GetSessionLabel(push_time)
     run_mode = "手动实时" if force_run else "定时"
     logger.info("=" * 50)
@@ -103,18 +98,19 @@ def Job(
         logger.info("正在拉取实时行情与 K 线...")
         data = FetchAllData()
 
-        logger.info("正在并行拉取四类实时资讯（个股/板块/政策/宏观）...")
+        logger.info("正在并行拉取多源资讯（个股/板块/政策/宏观/联网）...")
         news_bundle = FetchNews(data)
         news_bundle = AnalyzeNewsImpact(news_bundle, data)
         news_items = FlattenNewsItems(news_bundle)
         stats = news_bundle.get("impact_stats", {})
         by_category = stats.get("by_category", {})
         logger.info(
-            "资讯就绪 — 个股相关:%s 板块相关:%s 政策相关:%s 宏观相关:%s ｜ 相关:%s 涨/跌:%s",
+            "资讯就绪 — 个股:%s 板块:%s 政策:%s 宏观:%s 联网:%s ｜ 相关:%s 涨/跌:%s",
             by_category.get("stock", 0),
             by_category.get("sector", 0),
             by_category.get("policy", 0),
             by_category.get("macro", 0),
+            by_category.get("web_search", 0),
             stats.get("relevant", 0),
             stats.get("impactful", 0),
         )
@@ -126,17 +122,22 @@ def Job(
 
         analysis = AnalyzeAll(data)
         analysis = MergeNewsIntoAnalysis(analysis, news_bundle)
-        horizon = ResolvePredictionHorizon(label)
+        display_label, horizon = ResolveSessionAndHorizon(label)
         advice = GenerateAdvice(
             analysis,
             data,
             news_items=news_items,
             news_bundle=news_bundle,
-            session_label=label,
+            session_label=display_label,
             mode="daily",
             prediction_horizon=horizon,
         )
-        success = PushReport(data, analysis, advice, session_label=label, report_mode="daily")
+        success = PushReport(
+            data, analysis, advice,
+            session_label=display_label,
+            report_mode="daily",
+            push_time=push_time,
+        )
 
         if success:
             logger.info("日常分析完成，报告已推送")

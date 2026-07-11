@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import tempfile
+from datetime import date
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -10,10 +13,17 @@ import pandas as pd
 import config
 from advisor import GenerateAdvice
 from analyzer import AnalyzeAll, MergeNewsIntoAnalysis
-from dingtalk_pusher import BuildPortfolioReportMarkdown, BuildReportMarkdown, ResolveTradeDisplayLevels
-from market_context import ResolvePredictionHorizon
+from dingtalk_pusher import (
+    BuildDetailSectionsMarkdown,
+    BuildDingTalkReportMarkdown,
+    BuildPortfolioReportMarkdown,
+    BuildReportMarkdown,
+    ResolveTradeDisplayLevels,
+)
+from market_context import ResolvePredictionHorizon, ResolveSessionAndHorizon
 from news_analyzer import AnalyzeNewsImpact, CalcNewsScore
 from portfolio_advisor import GeneratePortfolioAdvice
+from report_web import PublishDetailReport, RenderDetailReportHtml
 
 
 def BuildMockKline(days: int = 60) -> pd.DataFrame:
@@ -111,8 +121,8 @@ def BuildMockRealtime() -> dict:
         "code": "301075",
         "name": "多瑞生物",
         "price": 61.67,
-        "change_pct": 1.25,
-        "change_amt": 0.78,
+        "change_pct": 5.20,
+        "change_amt": 3.05,
         "open": 62.80,
         "high": 64.10,
         "low": 62.50,
@@ -165,6 +175,13 @@ def BuildMockNews() -> dict[str, Any]:
     ]
     policy = [
         {
+            "title": "国家基药目录调整：司美格鲁肽注射液（降糖）正式纳入",
+            "content": "三部门联合发文，司美格鲁肽注射液降糖适应症纳入国家基药目录，9月起基层医院统一配备。",
+            "time": "20260709",
+            "source": "央视新闻",
+            "category": "policy",
+        },
+        {
             "title": "国家药监局发布创新药审评审批优化措施",
             "content": "政策鼓励创新药加速上市，利好生物医药企业。",
             "time": "20260710",
@@ -179,6 +196,24 @@ def BuildMockNews() -> dict[str, Any]:
             "category": "policy",
         },
     ]
+    web_search = [
+        {
+            "title": "多瑞生物 GLP-1多肽原料药布局受关注",
+            "content": "公司通过子公司布局司美格鲁肽、替尔泊肽等多肽原料药，拥有吨级合成产能。",
+            "time": "2026-07-10 09:00",
+            "source": "Tavily",
+            "category": "web_search",
+            "url": "https://example.com/news1",
+        },
+        {
+            "title": "7月10日减肥药概念大涨 板块资金涌入",
+            "content": "GLP-1减肥药指数大涨，多只龙头涨停，低位医药小票获资金挖掘。",
+            "time": "2026-07-10 10:30",
+            "source": "Tavily",
+            "category": "web_search",
+            "url": "https://example.com/news2",
+        },
+    ]
     macro = [
         {
             "title": "[中国] 6月CPI同比公布",
@@ -188,13 +223,14 @@ def BuildMockNews() -> dict[str, Any]:
             "category": "macro",
         },
     ]
-    items = stock + sector + policy + macro
+    items = stock + sector + policy + macro + web_search
     return {
         "items": items,
         "stock": stock,
         "sector": sector,
         "policy": policy,
         "macro": macro,
+        "web_search": web_search,
         "sector_keywords": ["医药", "医疗", "创新药"],
         "sector_snapshot": [
             "概念板块TOP5：",
@@ -229,12 +265,71 @@ def RunPredictionHorizonTest(
 
 def VerifyLayeredPredictions(report: str, expected_near_keyword: str) -> bool:
     """验证三层预测结构。"""
-    return (
+    near_ok = (
         expected_near_keyword in report
+        or "下交易日预测" in report
+    )
+    return (
+        near_ok
         and "短期（1~2周）" in report
         and "长期（1~3月）" in report
         and report.count("**操作建议**") >= 3
     )
+
+
+def RunHorizonResolverTests(
+    data: dict[str, Any],
+    analysis: dict[str, Any],
+    news_bundle: dict[str, Any],
+) -> tuple[bool, bool, bool]:
+    """验证非交易日与周五 horizon 解析及钉钉展示。"""
+    sat_label, sat_horizon = ResolveSessionAndHorizon(
+        "下午盘中", check_date=date(2026, 7, 11),
+    )
+    sat_ok = (
+        sat_label == "周末休市"
+        and sat_horizon.get("near_term_label") == "下交易日预测"
+        and sat_horizon.get("is_trading_day") is False
+        and "7月13日" in str(sat_horizon.get("near_term_target", ""))
+        and "周一" in str(sat_horizon.get("near_term_target", ""))
+    )
+
+    fri_label, fri_horizon = ResolveSessionAndHorizon(
+        "收盘后", check_date=date(2026, 7, 10),
+    )
+    fri_ok = (
+        fri_label == "收盘后"
+        and fri_horizon.get("is_trading_day") is True
+        and fri_horizon.get("near_term_label") == "下交易日预测"
+        and "7月13日" in str(fri_horizon.get("near_term_target", ""))
+        and "周六" not in str(fri_horizon.get("near_term_target", ""))
+    )
+
+    sat_advice = GenerateAdvice(
+        analysis,
+        data,
+        news_items=news_bundle["items"],
+        news_bundle=news_bundle,
+        session_label=sat_label,
+        mode="daily",
+        prediction_horizon=sat_horizon,
+    )
+    sat_advice["news_summary"] = "休市期间政策面偏暖，关注下一交易日开盘"
+    sat_report = BuildDingTalkReportMarkdown(
+        data, analysis, sat_advice,
+        session_label=sat_label,
+        report_mode="daily",
+    )
+    sat_dingtalk_ok = (
+        "周末休市" in sat_report
+        and "下交易日预测" in sat_report
+        and "预测对象" in sat_report
+        and "休市中" in sat_report
+        and "资讯综合" in sat_report
+        and "休市期间政策面偏暖" in sat_report
+        and "【个股资讯】" not in sat_report
+    )
+    return sat_ok, fri_ok, sat_dingtalk_ok
 
 
 def RunMockTest() -> None:
@@ -248,6 +343,11 @@ def RunMockTest() -> None:
         {"account": "账户B", "cost": 63.38, "shares": 800},
     ]
     config.LLM_ENABLED = False
+    config.STOCK_THEMES = ["GLP-1", "司美格鲁肽", "多肽原料药"]
+    config.PRICE_MOVE_MIN_PCT = 2.0
+    config.REPORT_WEB_ENABLED = True
+    config.REPORT_WEB_BASE_URL = "https://susu108.github.io/AI_Stock_Analysis/reports"
+    config.REPORT_WEB_OUTPUT_DIR = tempfile.mkdtemp(prefix="stock_report_")
 
     data = {
         "realtime": BuildMockRealtime(),
@@ -256,6 +356,13 @@ def RunMockTest() -> None:
         "industry": BuildMockIndustryBoards(),
         "fund_flow": BuildMockFundFlow(),
         "lhb": None,
+        "margin": {
+            "margin_balance": 12500000,
+            "margin_balance_prev": 12100000,
+            "margin_balance_change": 400000,
+            "margin_buy": 850000,
+            "trade_date": "2026-07-09",
+        },
     }
 
     news_bundle = AnalyzeNewsImpact(BuildMockNews(), data)
@@ -264,9 +371,14 @@ def RunMockTest() -> None:
         if item.get("category") == "stock" and "注册证书" in title:
             item["impact"] = "涨"
             item["strength"] = 4
-        elif item.get("category") == "sector" and "震荡走强" in title:
-            item["impact"] = "跌"
-            item["strength"] = 3
+        elif item.get("category") == "policy" and "基药目录" in title:
+            item["impact"] = "涨"
+            item["strength"] = 5
+            item["impact_reason"] = "GLP-1标杆药纳入基药，产业链受益"
+        elif item.get("category") == "web_search" and "GLP-1" in title:
+            item["impact"] = "涨"
+            item["strength"] = 4
+            item["impact_reason"] = "题材匹配GLP-1上游原料药"
     news_score, news_signals = CalcNewsScore(news_bundle.get("relevant_items", []))
     news_bundle["news_score"] = news_score
     news_bundle["news_signals"] = news_signals
@@ -283,8 +395,35 @@ def RunMockTest() -> None:
         mode="daily",
         prediction_horizon=ResolvePredictionHorizon("收盘后"),
     )
-    report = BuildReportMarkdown(
+
+    advice["news_summary"] = "政策面偏暖，GLP-1产业链受益，下一交易日关注开盘承接"
+    advice["policy_impact"] = "司美格鲁肽纳入基药目录，产业链受益"
+
+    detail_md = BuildDetailSectionsMarkdown(
         data, analysis, advice, session_label="收盘后", report_mode="daily",
+    )
+    detail_url = PublishDetailReport(
+        title=f"{config.STOCK_NAME} 深度报告",
+        markdown_body=detail_md,
+        meta={
+            "stock_name": config.STOCK_NAME,
+            "stock_code": config.STOCK_CODE,
+            "session_label": "收盘后",
+            "change_pct": data["realtime"]["change_pct"],
+        },
+        session_label="收盘后",
+    )
+    html = RenderDetailReportHtml(
+        f"{config.STOCK_NAME} 深度报告",
+        detail_md,
+        meta={"change_pct": data["realtime"]["change_pct"]},
+    )
+
+    report = BuildDingTalkReportMarkdown(
+        data, analysis, advice,
+        session_label="收盘后",
+        report_mode="daily",
+        detail_url=detail_url,
     )
 
     print(report)
@@ -301,12 +440,16 @@ def RunMockTest() -> None:
         "【政策/监管】",
         "【宏观事件】",
     ]
-    sections_ok = all(section in report for section in four_dim_sections)
+    sections_ok = all(section in BuildReportMarkdown(
+        data, analysis, advice, session_label="收盘后", full=True,
+    ) for section in four_dim_sections)
+    dingtalk_compact_ok = all(section not in report for section in four_dim_sections)
     categories_ok = all(by_cat.get(k, 0) > 0 for k in ("stock", "sector", "policy", "macro"))
     print(f"定价校验: 买入<{price}<卖出 → {'通过' if buy_ok else '失败'}")
     print(f"日常报告含持仓章节: {'否（正确）' if not has_portfolio_section else '是（错误）'}")
     print(f"相关资讯: {stats}")
     print(f"四维分节可见: {'通过' if sections_ok else '失败'}")
+    print(f"钉钉精简（四维不在正文）: {'通过' if dingtalk_compact_ok else '失败'}")
     print(f"四维分类计数: {'通过' if categories_ok else '失败'} — {by_cat}")
     news_merge_ok = (
         analysis.get("news_score", 0) != 0
@@ -369,10 +512,46 @@ def RunMockTest() -> None:
     print(f"开盘前Horizon: {'通过' if pre_ok else '失败'}")
     print(f"盘中Horizon: {'通过' if intraday_ok else '失败'}")
 
+    sat_ok, fri_ok, sat_dingtalk_ok = RunHorizonResolverTests(data, analysis, news_bundle)
+    print(f"周末Horizon解析: {'通过' if sat_ok else '失败'}")
+    print(f"周五Horizon解析: {'通过' if fri_ok else '失败'}")
+    print(f"周末钉钉资讯融合: {'通过' if sat_dingtalk_ok else '失败'}")
+    news_brief_ok = "资讯综合" in report and "GLP-1产业链受益" in report
+    news_idx = report.find("资讯综合")
+    detail_idx = report.find("完整深度报告")
+    score_idx = report.find("四维评分")
+    detail_link_pos_ok = (
+        news_idx >= 0
+        and detail_idx > news_idx
+        and (score_idx < 0 or detail_idx < score_idx)
+        and "👉 点击查看" in report
+    )
+    print(f"钉钉资讯综合块: {'通过' if news_brief_ok else '失败'}")
+    print(f"深度报告链接位置: {'通过' if detail_link_pos_ok else '失败'}")
+
+    price_move = advice.get("price_move") or {}
+    web_report_ok = (
+        detail_url is not None
+        and "完整深度报告" in report
+        and "**AI 研判" not in report
+        and "【个股资讯】" not in report
+        and "涨跌归因拆解" in html
+        and "详细依据" in html
+        and "资讯解读" in html
+        and "section-catalyst" in html
+        and price_move.get("dimensions")
+    )
+    print(
+        f"网页详细报告: {'通过' if web_report_ok else '失败'}"
+        f" — url={detail_url} source={price_move.get('source')}"
+    )
+
     if (
         not sections_ok or not categories_ok or not news_merge_ok
         or not trade_format_ok or not levels_ok or not layered_ok
-        or not pre_ok or not intraday_ok
+        or not pre_ok or not intraday_ok or not web_report_ok or not dingtalk_compact_ok
+        or not sat_ok or not fri_ok or not sat_dingtalk_ok or not news_brief_ok
+        or not detail_link_pos_ok
     ):
         raise SystemExit(1)
 

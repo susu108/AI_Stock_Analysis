@@ -13,6 +13,7 @@ from typing import Any
 import requests
 
 import config
+from report_web import PublishDetailReport
 from trade_zones import ResolveTierRecommended
 from utils import (
     FormatAmount,
@@ -287,6 +288,8 @@ def _BuildComprehensivePredictionSection(
     analysis: dict[str, Any],
     advice: dict[str, Any],
     ai_tag: str,
+    detail_url: str | None = None,
+    detail_local_hint: str = "",
 ) -> list[str]:
     """构建 AI 分层综合预测章节。"""
     predictions = advice.get("predictions") or {}
@@ -319,14 +322,25 @@ def _BuildComprehensivePredictionSection(
         "",
         f"- **预测Horizon** {horizon.get('near_term_label', '近端预测')}"
         f"（{horizon.get('session_label', '')}）",
-        f"- **量化综合** {_EmScore(weighted, 1)}",
     ]
+    near_target = str(horizon.get("near_term_target", "")).strip()
+    if near_target:
+        lines.append(f"- **预测对象** {near_target}")
+    lines.append(f"- **量化综合** {_EmScore(weighted, 1)}")
     if near:
         lines.extend(_BuildPredictionTierBlock(near, show_range=True))
     if short_t:
         lines.extend(_BuildPredictionTierBlock(short_t))
     if long_t:
         lines.extend(_BuildPredictionTierBlock(long_t))
+
+    news_brief = _BuildNewsBriefSection(advice, ai_tag)
+    if news_brief:
+        lines.extend(news_brief)
+
+    detail_link = _BuildDetailReportLinkSection(detail_url, detail_local_hint)
+    if detail_link:
+        lines.extend(detail_link)
 
     lines.extend([
         "",
@@ -345,6 +359,97 @@ def _BuildComprehensivePredictionSection(
                 lines.append(f"- {_HighlightNewsSignalTitle(text)}")
         lines.append("")
     return lines
+
+
+def _BuildNewsBriefSection(
+    advice: dict[str, Any],
+    ai_tag: str,
+) -> list[str]:
+    """构建钉钉精简版资讯综合块（不含四维长列表）。"""
+    news_summary = str(advice.get("news_summary", "")).strip()
+    sector_impact = str(advice.get("sector_impact", "")).strip()
+    policy_impact = str(advice.get("policy_impact", "")).strip()
+    news_impact = str(advice.get("news_impact", "")).strip()
+    news_conclusion = str(advice.get("news_conclusion", "")).strip()
+
+    news_bundle = advice.get("news_bundle") or {}
+    relevant_items: list[dict[str, Any]] = list(
+        news_bundle.get("relevant_items")
+        or news_bundle.get("scored_items", [])
+    )
+    bullish = [i for i in relevant_items if i.get("impact") == "涨"]
+    bearish = [i for i in relevant_items if i.get("impact") == "跌"]
+
+    horizon = advice.get("prediction_horizon") or {}
+    is_trading_day = bool(horizon.get("is_trading_day", True))
+    price_move = advice.get("price_move") or {}
+    move_headline = ""
+    if not is_trading_day:
+        move_headline = str(price_move.get("headline", "")).strip()
+    elif abs(float(price_move.get("move_pct", 0) or 0)) >= 2:
+        move_headline = str(price_move.get("headline", "")).strip()
+
+    has_content = bool(
+        news_summary or sector_impact or policy_impact
+        or news_impact or news_conclusion or bullish or bearish or move_headline
+    )
+    if not has_content:
+        return []
+
+    lines: list[str] = ["", f"**资讯综合{ai_tag}**"]
+    if news_summary:
+        lines.append(f"- {_TruncateText(news_summary, 120)}")
+    if policy_impact:
+        lines.append(f"- **政策** {_TruncateText(policy_impact, 120)}")
+    if sector_impact:
+        lines.append(f"- **板块** {_TruncateText(sector_impact, 80)}")
+    conclusion = news_impact or news_conclusion
+    if conclusion:
+        lines.append(f"- **方向** {_TruncateText(conclusion, 100)}")
+    if bullish:
+        item = bullish[0]
+        reason = str(item.get("impact_reason") or item.get("title", "")).strip()
+        if reason:
+            lines.append(f"- **利好** {_TruncateText(reason, 80)}")
+    if bearish:
+        item = bearish[0]
+        reason = str(item.get("impact_reason") or item.get("title", "")).strip()
+        if reason:
+            lines.append(f"- **利空** {_TruncateText(reason, 80)}")
+    if move_headline:
+        label = "上日涨跌" if not is_trading_day else "涨跌主因"
+        lines.append(f"- **{label}** {_TruncateText(move_headline, 100)}")
+    lines.append("")
+    return lines
+
+
+def _BuildDetailReportLinkSection(
+    detail_url: str | None = None,
+    detail_local_hint: str = "",
+) -> list[str]:
+    """构建醒目完整深度报告链接（置于资讯综合之后）。"""
+    if detail_url:
+        return [
+            "",
+            _SectionDivider(),
+            "",
+            '<font color="#1677FF">**📄 完整深度报告**</font>',
+            "",
+            f'<font color="#1677FF">**[👉 点击查看：涨跌归因 · 详细依据 · 资讯解读]({detail_url})**</font>',
+            "",
+            "<font color=\"#757575\">五维涨跌归因 / 买卖详细依据 / 四维资讯解读</font>",
+            "",
+        ]
+    if detail_local_hint:
+        return [
+            "",
+            _SectionDivider(),
+            "",
+            "**📄 完整深度报告**",
+            f"- {detail_local_hint}",
+            "",
+        ]
+    return []
 
 
 def _NextSection(section: list[int], title: str) -> str:
@@ -403,6 +508,7 @@ _NO_DIRECT_IMPACT_COPY: dict[str, str] = {
     "sector": "暂无直接影响该股价涨跌的板块/行业事件，可作背景参考",
     "policy": "暂无直接影响该股价涨跌的政策/监管事件，可作背景参考",
     "macro": "暂无直接影响该股价涨跌的宏观事件，可作背景参考",
+    "web_search": "联网搜索暂无直接影响涨跌的结果，可作背景参考",
 }
 
 
@@ -499,6 +605,7 @@ def _BuildNewsByCategorySections(
         ("stock", "【个股资讯】", 5),
         ("sector", "【板块/行业】", 4),
         ("policy", "【政策/监管】", 6),
+        ("web_search", "【联网搜索】", 4),
         ("macro", "【宏观事件】", 3),
     ]
     lines: list[str] = []
@@ -912,6 +1019,7 @@ def _BuildReportHeaderSection(
     near_advice: str,
     counts_hdr: dict[str, int],
     fetched_at_hdr: str,
+    horizon: dict[str, Any] | None = None,
 ) -> list[str]:
     """构建报告顶部速览（大标题分行，适配钉钉 Markdown 换行）。"""
     lines: list[str] = [
@@ -924,9 +1032,15 @@ def _BuildReportHeaderSection(
         f"{_FormatChangeDisplay(change_pct, change_amt)}",
         "",
         f"**方向** {_DirectionBadge(header_direction, header_icon)}",
+    ]
+    if horizon:
+        target = str(horizon.get("near_term_target", "")).strip()
+        if target:
+            lines.extend(["", f"**预测对象** {target}"])
+    lines.extend([
         "",
         f"**买卖建议** 买 {_EmAction(buy_action)} ｜ 卖 {_EmAction(sell_action)}",
-    ]
+    ])
     if add_tier1.get("low") and add_tier1.get("high"):
         rec1 = ResolveTierRecommended(add_tier1, "buy")
         if rec1 > 0:
@@ -963,13 +1077,16 @@ def _BuildRealtimeSection(
     prev_close: float,
     change_pct: float,
     change_amt: float,
+    is_trading_day: bool = True,
 ) -> list[str]:
     """构建实时行情章节（列表分行，避免钉钉合并引用块）。"""
     if not rt:
         return ["", "实时行情数据暂不可用", ""]
 
-    return [
-        "",
+    lines: list[str] = [""]
+    if not is_trading_day:
+        lines.append("- **说明** 休市中，以下行情为上一交易日收盘参考")
+    lines.extend([
         f"- **现价** {_BoldPrice(price, 'up' if change_pct >= 0 else 'down')}  "
         f"｜ 昨收 {_BoldPrice(prev_close)}  "
         f"｜ {_FormatChangeDisplay(change_pct, change_amt)}",
@@ -982,17 +1099,163 @@ def _BuildRealtimeSection(
         f"**{rt.get('volume_ratio', 0):.2f}**",
         f"- **PE/PB** **{rt.get('pe', 0):.1f}** / **{rt.get('pb', 0):.2f}**",
         "",
+    ])
+    return lines
+
+
+_DIM_CN_NUMS = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
+
+
+def _BuildPriceMoveSection(
+    price_move: dict[str, Any] | None,
+    ai_tag: str,
+) -> list[str]:
+    """构建涨跌归因拆解章节。"""
+    if not price_move:
+        return []
+
+    direction = str(price_move.get("move_direction", "平"))
+    move_pct = float(price_move.get("move_pct", 0) or 0)
+    headline = str(price_move.get("headline", "")).strip()
+    disclaimer = str(price_move.get("disclaimer", "")).strip()
+    brief = bool(price_move.get("brief"))
+    source_tag = ai_tag if price_move.get("source") == "llm" else ""
+
+    lines: list[str] = [
+        "",
+        f"- **归因摘要{source_tag}** {_EmAction(headline) if headline else '—'}",
     ]
+    if disclaimer:
+        lines.append(f"- {disclaimer}")
+
+    if brief:
+        gaps = price_move.get("evidence_gaps") or []
+        if gaps:
+            lines.append(f"- **证据缺口** {'；'.join(str(g) for g in gaps[:3])}")
+        lines.append("")
+        return lines
+
+    dimensions = price_move.get("dimensions") or []
+    for idx, dim in enumerate(dimensions, 1):
+        if not isinstance(dim, dict):
+            continue
+        dim_title = str(dim.get("title", "")).strip()
+        num = _DIM_CN_NUMS[idx] if idx < len(_DIM_CN_NUMS) else str(idx)
+        section_title = f"**{num}、{dim_title}**"
+        if dim.get("id") == "risks":
+            section_title = f'<font color="#E53935">{section_title}</font>'
+        elif dim.get("id") == "catalyst":
+            section_title = f'<font color="#E53935">{section_title}</font>' if direction == "涨" else (
+                f'<font color="#43A047">{section_title}</font>' if direction == "跌" else section_title
+            )
+        lines.extend(["", section_title])
+
+        points = dim.get("points") or []
+        if not points:
+            lines.append("- 暂无足够证据支撑该维度归因")
+            continue
+        for pt in points:
+            if not isinstance(pt, dict):
+                continue
+            subtitle = str(pt.get("subtitle", "")).strip()
+            content = str(pt.get("content", "")).strip()
+            evidence = str(pt.get("evidence", "")).strip()
+            if not content:
+                continue
+            bullet = f"- **{subtitle}** {content}" if subtitle else f"- {content}"
+            lines.append(_HighlightMetricsInText(bullet))
+            if evidence and evidence not in content:
+                lines.append(f"  - 依据：{evidence}")
+
+        limitations = str(dim.get("limitations", "")).strip()
+        if limitations:
+            lines.append(f"- **限制** {limitations}")
+
+    gaps = price_move.get("evidence_gaps") or []
+    if gaps:
+        lines.extend(["", "**证据缺口**"])
+        for gap in gaps[:5]:
+            lines.append(f"- {gap}")
+
+    lines.append("")
+    return lines
 
 
-def BuildReportMarkdown(
+_DISCLAIMER_WEB = (
+    "以上分析由程序自动生成，仅供参考，不构成投资建议。股市有风险，投资需谨慎。"
+)
+
+
+def BuildDetailSectionsMarkdown(
     data: dict[str, Any],
     analysis: dict[str, Any],
     advice: dict[str, Any],
     session_label: str = "盘中",
     report_mode: str = "daily",
 ) -> str:
-    """构建完整 Markdown 分析报告。"""
+    """构建网页详细报告 Markdown（涨跌归因 + 详细依据 + 资讯解读）。"""
+    rt = data.get("realtime") or {}
+    change_pct = rt.get("change_pct", 0)
+    ai_tag = "（AI）" if advice.get("llm_used") else ""
+    lines: list[str] = [
+        f"# {config.STOCK_NAME}({config.STOCK_CODE}) 深度报告",
+        f"> {NowStr()} ｜ {session_label}",
+        "",
+    ]
+
+    price_move = advice.get("price_move")
+    detail_idx = 1
+    if price_move:
+        move_pct_hdr = float(price_move.get("move_pct", change_pct) or change_pct)
+        pct_text = FormatPercent(move_pct_hdr)
+        cn = _DIM_CN_NUMS[detail_idx] if detail_idx < len(_DIM_CN_NUMS) else str(detail_idx)
+        lines.extend([
+            _SectionDivider(),
+            "",
+            f'<h2 id="section-catalyst">{cn}、涨跌归因拆解（{pct_text}）</h2>',
+        ])
+        lines.extend(_BuildPriceMoveSection(price_move, ai_tag))
+        detail_idx += 1
+
+    cn = _DIM_CN_NUMS[detail_idx] if detail_idx < len(_DIM_CN_NUMS) else str(detail_idx)
+    lines.extend([
+        "",
+        _SectionDivider(),
+        "",
+        f'<h2 id="section-reasons">{cn}、详细依据{ai_tag}</h2>',
+    ])
+    lines.extend(_BuildDetailedReasonsSection(advice))
+    detail_idx += 1
+
+    news_section = _BuildNewsInterpretationSection(advice, ai_tag)
+    if news_section:
+        cn = _DIM_CN_NUMS[detail_idx] if detail_idx < len(_DIM_CN_NUMS) else str(detail_idx)
+        lines.extend([
+            "",
+            _SectionDivider(),
+            "",
+            f'<h2 id="section-news">{cn}、资讯解读{ai_tag}</h2>',
+        ])
+        lines.extend(news_section)
+
+    lines.extend([
+        "",
+        _SectionDivider(),
+        f"> ⚠️ {_DISCLAIMER_WEB}",
+    ])
+    return "\n".join(lines)
+
+
+def BuildDingTalkReportMarkdown(
+    data: dict[str, Any],
+    analysis: dict[str, Any],
+    advice: dict[str, Any],
+    session_label: str = "盘中",
+    report_mode: str = "daily",
+    detail_url: str | None = None,
+    detail_local_hint: str = "",
+) -> str:
+    """构建钉钉精简版 Markdown（不含涨跌归因/详细依据/资讯解读）。"""
     mode = advice.get("report_mode", report_mode)
     rt = data.get("realtime") or {}
     price = rt.get("price", analysis.get("indicators", {}).get("price", 0))
@@ -1001,17 +1264,6 @@ def BuildReportMarkdown(
     change_amt = rt.get("change_amt", 0)
 
     direction = analysis.get("direction", "震荡")
-    icon = analysis.get("direction_icon", "➡️")
-    confidence = analysis.get("confidence", 1)
-    weighted = analysis.get("weighted_score", 0)
-    tech_score = analysis.get("tech_score", 0)
-    fund_score = analysis.get("fund_score", 0)
-    sector_score = analysis.get("sector_score", 0)
-    news_score = analysis.get("news_score", 0)
-    news_signals = list(analysis.get("news_signals", []))
-    change_low = analysis.get("change_low", 0)
-    change_high = analysis.get("change_high", 0)
-
     buy_icon = "🟢" if advice.get("buy_ok") else "🟡"
     sell_icon = "🔴" if advice.get("sell_ok") else "🟡"
     ai_tag = "（AI）" if advice.get("llm_used") else ""
@@ -1031,6 +1283,8 @@ def BuildReportMarkdown(
     )
     news_bundle_hdr = advice.get("news_bundle") or {}
     counts_hdr = news_bundle_hdr.get("category_counts", {})
+    horizon_hdr = advice.get("prediction_horizon") or {}
+    is_trading_day = bool(horizon_hdr.get("is_trading_day", True))
 
     lines: list[str] = _BuildReportHeaderSection(
         float(price),
@@ -1045,6 +1299,7 @@ def BuildReportMarkdown(
         str(near_hdr.get("advice", "")),
         counts_hdr,
         str(news_bundle_hdr.get("fetched_at", "")),
+        horizon=horizon_hdr,
     )
 
     lines.extend([
@@ -1052,7 +1307,10 @@ def BuildReportMarkdown(
         "",
         _NextSection(sec, "实时行情"),
     ])
-    lines.extend(_BuildRealtimeSection(rt, float(price), float(prev_close), float(change_pct), float(change_amt)))
+    lines.extend(_BuildRealtimeSection(
+        rt, float(price), float(prev_close), float(change_pct), float(change_amt),
+        is_trading_day=is_trading_day,
+    ))
 
     portfolio = advice.get("portfolio")
     if portfolio and mode != "daily":
@@ -1086,7 +1344,11 @@ def BuildReportMarkdown(
         _NextSection(sec, f"综合预测{ai_tag}"),
         "",
     ])
-    lines.extend(_BuildComprehensivePredictionSection(analysis, advice, ai_tag))
+    lines.extend(_BuildComprehensivePredictionSection(
+        analysis, advice, ai_tag,
+        detail_url=detail_url,
+        detail_local_hint=detail_local_hint,
+    ))
 
     lines.extend([
         "",
@@ -1106,19 +1368,6 @@ def BuildReportMarkdown(
             f"参考股数：{t_trade.get('shares', 0)}",
             f"- 说明：{t_trade.get('note', '')}（T+1限制）",
         ])
-
-    lines.extend([
-        "",
-        _SectionDivider(),
-        "",
-        _NextSection(sec, f"详细依据{ai_tag}"),
-    ])
-    lines.extend(_BuildDetailedReasonsSection(advice))
-
-    news_section = _BuildNewsInterpretationSection(advice, ai_tag)
-    if news_section:
-        lines.extend(["", _SectionDivider(), "", _NextSection(sec, f"资讯解读{ai_tag}")])
-        lines.extend(news_section)
 
     lines.extend(["", _SectionDivider(), "", _NextSection(sec, "技术面信号")])
     lines.extend(_BuildSignalListSection(
@@ -1170,6 +1419,30 @@ def BuildReportMarkdown(
     ])
 
     return "\n".join(lines)
+
+
+def BuildReportMarkdown(
+    data: dict[str, Any],
+    analysis: dict[str, Any],
+    advice: dict[str, Any],
+    session_label: str = "盘中",
+    report_mode: str = "daily",
+    full: bool = False,
+    detail_url: str | None = None,
+) -> str:
+    """构建分析报告 Markdown；full=True 时含网页详细章节（调试用）。"""
+    if full:
+        dingtalk_part = BuildDingTalkReportMarkdown(
+            data, analysis, advice, session_label, report_mode, detail_url=None,
+        )
+        detail_part = BuildDetailSectionsMarkdown(
+            data, analysis, advice, session_label, report_mode,
+        )
+        return f"{dingtalk_part}\n\n---\n\n{detail_part}"
+
+    return BuildDingTalkReportMarkdown(
+        data, analysis, advice, session_label, report_mode, detail_url=detail_url,
+    )
 
 
 def BuildPortfolioReportMarkdown(portfolio_advice: dict[str, Any]) -> str:
@@ -1258,10 +1531,57 @@ def PushReport(
     advice: dict[str, Any],
     session_label: str = "盘中",
     report_mode: str = "daily",
+    push_time: str | None = None,
 ) -> bool:
-    """生成并推送分析报告。"""
+    """生成并推送分析报告（钉钉精简 + 网页详细）。"""
     title = f"{config.STOCK_NAME}({config.STOCK_CODE}) {session_label}分析报告"
-    text = BuildReportMarkdown(data, analysis, advice, session_label, report_mode)
+    rt = data.get("realtime") or {}
+    change_pct = rt.get("change_pct", 0)
+
+    detail_url: str | None = None
+    detail_local_hint = ""
+    if config.REPORT_WEB_ENABLED:
+        detail_md = BuildDetailSectionsMarkdown(
+            data, analysis, advice, session_label, report_mode,
+        )
+        detail_title = f"{config.STOCK_NAME}({config.STOCK_CODE}) 深度报告"
+        detail_url = PublishDetailReport(
+            title=detail_title,
+            markdown_body=detail_md,
+            meta={
+                "stock_name": config.STOCK_NAME,
+                "stock_code": config.STOCK_CODE,
+                "session_label": session_label,
+                "change_pct": change_pct,
+                "generated_at": NowStr(),
+            },
+            session_label=session_label,
+            push_time=push_time,
+        )
+        if detail_url:
+            logger.info("详细报告链接: %s", detail_url)
+            local_path = config.ResolveReportWebOutputDir() / "latest.html"
+            logger.info(
+                "链接需 GitHub Pages 已开启（main 分支 /docs）且 docs/reports 已 push 至远程；"
+                "本地 --now 不会自动 push，请运行 Actions 或手动 git push docs/"
+            )
+        elif config.REPORT_WEB_LOCAL_HINT:
+            local_path = config.ResolveReportWebOutputDir() / "latest.html"
+            if local_path.exists():
+                detail_local_hint = (
+                    f"（网页已生成: `{local_path}`，请在 .env 配置 "
+                    f"REPORT_WEB_BASE_URL=https://susu108.github.io/AI_Stock_Analysis/reports）"
+                )
+                logger.warning(
+                    "REPORT_WEB_BASE_URL 未配置或无效，钉钉不附公网链接。"
+                    "请设置: https://susu108.github.io/AI_Stock_Analysis/reports"
+                )
+
+    text = BuildDingTalkReportMarkdown(
+        data, analysis, advice, session_label, report_mode,
+        detail_url=detail_url,
+        detail_local_hint=detail_local_hint,
+    )
     return SendMarkdown(title, text)
 
 

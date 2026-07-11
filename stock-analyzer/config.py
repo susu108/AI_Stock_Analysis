@@ -47,6 +47,21 @@ def _ParsePushTimes() -> list[str]:
     return [single] if single else ["09:00"]
 
 
+def _ParseFloat(value: str | None, default: float) -> float:
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return float(value.strip())
+    except ValueError:
+        return default
+
+
+def _ParseCsvList(raw: str | None) -> list[str]:
+    if raw is None or raw.strip() == "":
+        return []
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 DINGTALK_WEBHOOK: str = os.getenv("DINGTALK_WEBHOOK", "")
 DINGTALK_SECRET: str = os.getenv("DINGTALK_SECRET", "")
 STOCK_CODE: str = os.getenv("STOCK_CODE", "301075")
@@ -66,3 +81,31 @@ DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_BASE_URL: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 LLM_ENABLED: bool = _ParseBool(os.getenv("LLM_ENABLED"), True)
+
+# 联网搜索（涨跌归因政策资讯补全）
+WEB_SEARCH_ENABLED: bool = _ParseBool(os.getenv("WEB_SEARCH_ENABLED"), False)
+WEB_SEARCH_PROVIDER: str = os.getenv("WEB_SEARCH_PROVIDER", "tavily").strip().lower()
+WEB_SEARCH_API_KEY: str = os.getenv("WEB_SEARCH_API_KEY", "")
+STOCK_THEMES: list[str] = _ParseCsvList(os.getenv("STOCK_THEMES"))
+WEB_SEARCH_CACHE_HOURS: int = _ParseInt(os.getenv("WEB_SEARCH_CACHE_HOURS"), 4)
+
+# 涨跌归因：涨跌幅低于阈值且无量能异常时输出简版
+PRICE_MOVE_MIN_PCT: float = _ParseFloat(os.getenv("PRICE_MOVE_MIN_PCT"), 2.0)
+
+# 网页详细报告（GitHub Pages）
+REPORT_WEB_ENABLED: bool = _ParseBool(os.getenv("REPORT_WEB_ENABLED"), True)
+REPORT_WEB_BASE_URL: str = os.getenv("REPORT_WEB_BASE_URL", "").strip().rstrip("/")
+REPORT_WEB_OUTPUT_DIR: str = os.getenv("REPORT_WEB_OUTPUT_DIR", "docs/reports").strip()
+REPORT_WEB_RETENTION: int = _ParseInt(os.getenv("REPORT_WEB_RETENTION"), 30)
+REPORT_WEB_LOCAL_HINT: bool = _ParseBool(os.getenv("REPORT_WEB_LOCAL_HINT"), True)
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def ResolveReportWebOutputDir() -> Path:
+    """解析网页报告输出目录（相对仓库根）。"""
+    configured = Path(REPORT_WEB_OUTPUT_DIR)
+    if configured.is_absolute():
+        return configured
+    return _REPO_ROOT / configured
+
