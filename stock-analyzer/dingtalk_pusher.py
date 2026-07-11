@@ -728,7 +728,7 @@ def _BuildNewsInterpretationSection(
 
     category_lines = _BuildNewsByCategorySections(relevant_items)
     if category_lines:
-        lines.extend(category_lines)
+        lines.extend(["", *category_lines])
     elif not bullish and not bearish and not neutral:
         lines.extend(["**📰 资讯概览**", "- 今日暂无显著相关资讯", ""])
 
@@ -1563,19 +1563,19 @@ def PushReport(
             logger.info("详细报告链接: %s", detail_url)
             local_path = config.ResolveReportWebOutputDir() / "latest.html"
             logger.info(
-                "链接需 GitHub Pages 已开启（main 分支 /docs）且 docs/reports 已 push 至远程；"
-                "本地 --now 不会自动 push，请运行 Actions 或手动 git push docs/"
+                "详细报告链接已生成；jsDelivr CDN 推送后约 1~5 分钟生效，"
+                "GitHub Pages 需开启 main/docs 且 docs/reports 已 push"
             )
         elif config.REPORT_WEB_LOCAL_HINT:
             local_path = config.ResolveReportWebOutputDir() / "latest.html"
             if local_path.exists():
                 detail_local_hint = (
                     f"（网页已生成: `{local_path}`，请在 .env 配置 "
-                    f"REPORT_WEB_BASE_URL=https://susu108.github.io/AI_Stock_Analysis/reports）"
+                    f"REPORT_WEB_BASE_URL=https://cdn.jsdelivr.net/gh/susu108/AI_Stock_Analysis@main/docs/reports）"
                 )
                 logger.warning(
                     "REPORT_WEB_BASE_URL 未配置或无效，钉钉不附公网链接。"
-                    "请设置: https://susu108.github.io/AI_Stock_Analysis/reports"
+                    "推荐: https://cdn.jsdelivr.net/gh/susu108/AI_Stock_Analysis@main/docs/reports"
                 )
 
     text = BuildDingTalkReportMarkdown(

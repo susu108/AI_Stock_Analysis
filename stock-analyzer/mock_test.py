@@ -346,7 +346,7 @@ def RunMockTest() -> None:
     config.STOCK_THEMES = ["GLP-1", "司美格鲁肽", "多肽原料药"]
     config.PRICE_MOVE_MIN_PCT = 2.0
     config.REPORT_WEB_ENABLED = True
-    config.REPORT_WEB_BASE_URL = "https://susu108.github.io/AI_Stock_Analysis/reports"
+    config.REPORT_WEB_BASE_URL = "https://cdn.jsdelivr.net/gh/susu108/AI_Stock_Analysis@main/docs/reports"
     config.REPORT_WEB_OUTPUT_DIR = tempfile.mkdtemp(prefix="stock_report_")
 
     data = {

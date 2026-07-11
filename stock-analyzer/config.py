@@ -92,14 +92,29 @@ WEB_SEARCH_CACHE_HOURS: int = _ParseInt(os.getenv("WEB_SEARCH_CACHE_HOURS"), 4)
 # 涨跌归因：涨跌幅低于阈值且无量能异常时输出简版
 PRICE_MOVE_MIN_PCT: float = _ParseFloat(os.getenv("PRICE_MOVE_MIN_PCT"), 2.0)
 
-# 网页详细报告（GitHub Pages）
+# 网页详细报告（GitHub Pages / jsDelivr CDN）
 REPORT_WEB_ENABLED: bool = _ParseBool(os.getenv("REPORT_WEB_ENABLED"), True)
 REPORT_WEB_BASE_URL: str = os.getenv("REPORT_WEB_BASE_URL", "").strip().rstrip("/")
+REPORT_WEB_CDN: str = os.getenv("REPORT_WEB_CDN", "jsdelivr").strip().lower()
+GITHUB_REPO: str = os.getenv("GITHUB_REPO", "susu108/AI_Stock_Analysis").strip()
+GITHUB_BRANCH: str = os.getenv("GITHUB_BRANCH", "main").strip()
 REPORT_WEB_OUTPUT_DIR: str = os.getenv("REPORT_WEB_OUTPUT_DIR", "docs/reports").strip()
 REPORT_WEB_RETENTION: int = _ParseInt(os.getenv("REPORT_WEB_RETENTION"), 30)
 REPORT_WEB_LOCAL_HINT: bool = _ParseBool(os.getenv("REPORT_WEB_LOCAL_HINT"), True)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def ResolveReportWebBaseUrl() -> str:
+    """解析报告公网 URL 前缀（优先 .env 显式配置，否则 jsDelivr CDN）。"""
+    explicit = REPORT_WEB_BASE_URL.strip().rstrip("/")
+    if explicit:
+        return explicit
+    if REPORT_WEB_CDN == "jsdelivr" and GITHUB_REPO:
+        return (
+            f"https://cdn.jsdelivr.net/gh/{GITHUB_REPO}@{GITHUB_BRANCH}/docs/reports"
+        )
+    return ""
 
 
 def ResolveReportWebOutputDir() -> Path:

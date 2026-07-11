@@ -282,10 +282,13 @@ def IsValidReportWebBaseUrl(base_url: str) -> bool:
 
 def BuildDetailPublicUrl(filename: str) -> str | None:
     """根据 BASE_URL 构建公网访问链接。"""
-    base = config.REPORT_WEB_BASE_URL.strip().rstrip("/")
+    base = config.ResolveReportWebBaseUrl().strip().rstrip("/")
     if not IsValidReportWebBaseUrl(base):
         return None
-    return f"{base}/{filename}"
+    url = f"{base}/{filename}"
+    if "cdn.jsdelivr.net" in base:
+        url = f"{url}?v={datetime.now().strftime('%Y%m%d%H%M')}"
+    return url
 
 
 def EnsureGithubPagesArtifacts(output_dir: Path) -> None:
@@ -293,6 +296,7 @@ def EnsureGithubPagesArtifacts(output_dir: Path) -> None:
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / ".nojekyll").touch(exist_ok=True)
+        (output_dir.parent / ".nojekyll").touch(exist_ok=True)
         index_path = output_dir.parent / "index.html"
         if not index_path.exists() or index_path.stat().st_size < 100:
             index_path.parent.mkdir(parents=True, exist_ok=True)
