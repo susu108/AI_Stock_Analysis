@@ -438,6 +438,9 @@ def _BuildDetailReportLinkSection(
             "",
             f'<font color="#1677FF">**[👉 点击查看：涨跌归因 · 详细依据 · 资讯解读]({detail_url})**</font>',
             "",
+            f"- **链接** {detail_url}",
+            "- **提示** 钉钉内若打不开，请长按复制上方链接，到 Safari/Chrome 打开",
+            "",
             "<font color=\"#757575\">五维涨跌归因 / 买卖详细依据 / 四维资讯解读</font>",
             "",
         ]
@@ -1571,11 +1574,11 @@ def PushReport(
             if local_path.exists():
                 detail_local_hint = (
                     f"（网页已生成: `{local_path}`，请在 .env 配置 "
-                    f"REPORT_WEB_BASE_URL=https://cdn.jsdelivr.net/gh/susu108/AI_Stock_Analysis@main/docs/reports）"
+                    f"REPORT_WEB_BASE_URL=https://ghfast.top/https://raw.githubusercontent.com/susu108/AI_Stock_Analysis/main/docs/reports）"
                 )
                 logger.warning(
                     "REPORT_WEB_BASE_URL 未配置或无效，钉钉不附公网链接。"
-                    "推荐: https://cdn.jsdelivr.net/gh/susu108/AI_Stock_Analysis@main/docs/reports"
+                    "推荐: https://ghfast.top/https://raw.githubusercontent.com/susu108/AI_Stock_Analysis/main/docs/reports"
                 )
 
     text = BuildDingTalkReportMarkdown(
