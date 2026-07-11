@@ -106,6 +106,17 @@ REPORT_WEB_LOCAL_HINT: bool = _ParseBool(os.getenv("REPORT_WEB_LOCAL_HINT"), Tru
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def BuildGithubPagesReportBase() -> str:
+    """构建 GitHub Pages 报告 URL 前缀（Content-Type 为 text/html）。"""
+    parts = GITHUB_REPO.split("/", 1)
+    if len(parts) != 2:
+        return ""
+    owner, repo = parts[0].strip(), parts[1].strip()
+    if not owner or not repo:
+        return ""
+    return f"https://{owner}.github.io/{repo}/reports"
+
+
 def ResolveReportWebBaseUrl() -> str:
     """解析报告公网 URL 前缀（优先 .env 显式配置，否则按 CDN 类型自动生成）。"""
     explicit = REPORT_WEB_BASE_URL.strip().rstrip("/")
@@ -113,14 +124,19 @@ def ResolveReportWebBaseUrl() -> str:
         return explicit
     if not GITHUB_REPO:
         return ""
-    raw_prefix = (
-        f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/docs/reports"
-    )
-    if REPORT_WEB_CDN == "ghproxy":
-        return f"{REPORT_WEB_GHPROXY}/{raw_prefix}"
+    pages_base = BuildGithubPagesReportBase()
+    if REPORT_WEB_CDN == "ghproxy" and pages_base:
+        # 必须走 GitHub Pages，不能用 raw.githubusercontent（会以 text/plain 返回 HTML 源码）
+        return f"{REPORT_WEB_GHPROXY}/{pages_base}"
+    if REPORT_WEB_CDN == "statically":
+        return (
+            f"https://cdn.statically.io/gh/{GITHUB_REPO}/{GITHUB_BRANCH}/docs/reports"
+        )
     if REPORT_WEB_CDN == "jsdelivr":
         return f"https://cdn.jsdelivr.net/gh/{GITHUB_REPO}@{GITHUB_BRANCH}/docs/reports"
-    return ""
+    if REPORT_WEB_CDN == "github_pages" and pages_base:
+        return pages_base
+    return pages_base
 
 
 def ResolveReportWebOutputDir() -> Path:

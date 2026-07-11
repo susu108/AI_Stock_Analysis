@@ -286,7 +286,7 @@ def BuildDetailPublicUrl(filename: str) -> str | None:
     if not IsValidReportWebBaseUrl(base):
         return None
     url = f"{base}/{filename}"
-    if "cdn.jsdelivr.net" in base or "ghfast.top" in base or "ghproxy" in base:
+    if "cdn.jsdelivr.net" in base or "ghfast.top" in base or "ghproxy" in base or "statically.io" in base:
         url = f"{url}?v={datetime.now().strftime('%Y%m%d%H%M')}"
     return url
 

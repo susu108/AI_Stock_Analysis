@@ -1566,19 +1566,18 @@ def PushReport(
             logger.info("详细报告链接: %s", detail_url)
             local_path = config.ResolveReportWebOutputDir() / "latest.html"
             logger.info(
-                "详细报告链接已生成；jsDelivr CDN 推送后约 1~5 分钟生效，"
-                "GitHub Pages 需开启 main/docs 且 docs/reports 已 push"
+                "详细报告链接已生成；ghproxy 镜像 push 至 GitHub 后约 1~3 分钟生效"
             )
         elif config.REPORT_WEB_LOCAL_HINT:
             local_path = config.ResolveReportWebOutputDir() / "latest.html"
             if local_path.exists():
                 detail_local_hint = (
                     f"（网页已生成: `{local_path}`，请在 .env 配置 "
-                    f"REPORT_WEB_BASE_URL=https://ghfast.top/https://raw.githubusercontent.com/susu108/AI_Stock_Analysis/main/docs/reports）"
+                    f"REPORT_WEB_CDN=ghproxy（自动走 GitHub Pages 镜像，勿用 raw.githubusercontent））"
                 )
                 logger.warning(
                     "REPORT_WEB_BASE_URL 未配置或无效，钉钉不附公网链接。"
-                    "推荐: https://ghfast.top/https://raw.githubusercontent.com/susu108/AI_Stock_Analysis/main/docs/reports"
+                    "请确保 GitHub Pages 已开启（main/docs），并使用 ghproxy 镜像 Pages 地址"
                 )
 
     text = BuildDingTalkReportMarkdown(
