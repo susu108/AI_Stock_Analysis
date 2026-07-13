@@ -1,4 +1,6 @@
 .env
+.scheduler.lock
+.push_dedup.json
 __pycache__/
 *.py[cod]
 *.log

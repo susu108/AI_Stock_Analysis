@@ -37,6 +37,7 @@ def ShouldSkipFullAnalysis(move_context: dict[str, Any]) -> bool:
 
 def BuildMoveContextPrompt(move_context: dict[str, Any]) -> str:
     """将结构化上下文序列化为 LLM 输入。"""
+    overlap = move_context.get("sector_theme_overlap") or {}
     lines = [
         f"目标：{move_context.get('stock_name')}({move_context.get('stock_code')})",
         f"日期：{move_context.get('move_date')}",
@@ -50,9 +51,14 @@ def BuildMoveContextPrompt(move_context: dict[str, Any]) -> str:
         f"主力净流入：{move_context.get('main_net_inflow'):.0f}元",
         f"融资余额变动：{move_context.get('margin_balance_change'):.0f}元",
         f"个股题材：{', '.join(move_context.get('stock_themes') or []) or '未配置'}",
-        "",
-        "【板块领涨】",
     ]
+    if move_context.get("stock_business"):
+        lines.append(f"公司主业：{move_context.get('stock_business')}")
+    lines.append(
+        f"概念题材重叠度：{overlap.get('overlap_level', '未知')}；"
+        f"个股相对概念均值偏离：{move_context.get('stock_vs_sector_divergence', 0):+.2f}%"
+    )
+    lines.extend(["", "【板块领涨】"])
     for leader in move_context.get("sector_leaders") or []:
         lines.append(
             f"- [{leader.get('type')}] {leader.get('name')} "
@@ -69,16 +75,33 @@ def BuildMoveContextPrompt(move_context: dict[str, Any]) -> str:
     for sig in (move_context.get("fund_signals") or [])[:4]:
         lines.append(f"- {sig}")
 
-    lines.extend(["", "【有影响资讯】"])
+    lines.extend(["", "【个股直接催化资讯 — directness=direct】"])
     for item in move_context.get("impactful_news") or []:
         lines.append(
-            f"- [{item.get('category')}|{item.get('impact')}] {item.get('title')} "
+            f"- [{item.get('category')}|{item.get('impact')}|direct] {item.get('title')} "
             f"— {item.get('impact_reason')}"
         )
-    for item in move_context.get("relevant_news") or []:
-        if item in (move_context.get("impactful_news") or []):
-            continue
-        lines.append(f"- [{item.get('category')}] {item.get('title')}")
+    if not (move_context.get("impactful_news") or []):
+        lines.append("- 无直接催化资讯")
+
+    lines.extend(["", "【板块背景/题材错配 — 不得等同个股利好】"])
+    for item in move_context.get("background_news") or []:
+        lines.append(
+            f"- [{item.get('category')}|{item.get('directness')}|{item.get('impact')}] "
+            f"{item.get('title')} — {item.get('impact_reason')}"
+        )
+    if not (move_context.get("background_news") or []):
+        lines.append("- 无板块背景/错配资讯")
+
+    other_news = [
+        i for i in (move_context.get("relevant_news") or [])
+        if i not in (move_context.get("impactful_news") or [])
+        and i not in (move_context.get("background_news") or [])
+    ]
+    if other_news:
+        lines.extend(["", "【其他相关资讯】"])
+        for item in other_news:
+            lines.append(f"- [{item.get('category')}] {item.get('title')}")
 
     lines.extend(["", "【联网搜索】"])
     for item in move_context.get("web_search_hits") or []:
@@ -115,10 +138,12 @@ def _BuildPriceMoveSystemPrompt() -> str:
         "1. dimensions 必须包含 catalyst/sector/technical/sentiment/risks 五维；"
         "2. 每维 2~4 个 points，content 须具体引用上下文中的数字、价位、资讯标题；"
         "3. 无证据时不编造，写入 evidence_gaps；"
-        "4. catalyst 区分直接催化与题材匹配；limitations 说明政策/业绩边界；"
-        "5. risks 维分析利好兑现、套牢区、杠杆抛压等后续隐患；"
-        "6. 涨跌幅为负时重点分析下跌原因；"
-        "7. 仅输出 JSON。"
+        "4. catalyst 仅引用【个股直接催化】资讯；无 direct 催化时写「无直接催化，板块利好未传导」；"
+        "5. sector 维须对比今日领涨板块与公司主业/题材是否同赛道，说明个股是否跟涨及分化原因；"
+        "6. 【板块背景/题材错配】资讯只可写入 sector 维，不得写入 catalyst 作为个股利好；"
+        "7. risks 维分析利好兑现、套牢区、杠杆抛压、题材错配等后续隐患；"
+        "8. 涨跌幅为负时重点分析下跌原因；"
+        "9. 仅输出 JSON。"
     )
 
 
@@ -244,22 +269,40 @@ def BuildRulePriceMoveFallback(move_context: dict[str, Any]) -> dict[str, Any]:
             "evidence": item.get("title", ""),
             "source_url": item.get("url", ""),
         })
-    for item in move_context.get("web_search_hits") or []:
+    if not points_catalyst:
         points_catalyst.append({
-            "subtitle": "联网搜索",
-            "content": f"{item.get('title')}：{item.get('content', '')[:100]}",
-            "evidence": item.get("source", "联网搜索"),
-            "source_url": item.get("url", ""),
+            "subtitle": "直接催化",
+            "content": "无直接催化资讯，板块/政策利好未明确传导至个股",
+            "evidence": "资讯 directness 分层",
+            "source_url": "",
         })
 
     sector_points: list[dict[str, str]] = []
     for leader in (move_context.get("sector_leaders") or [])[:3]:
+        overlap = move_context.get("sector_theme_overlap") or {}
+        overlap_level = overlap.get("overlap_level", "未知")
+        divergence = float(move_context.get("stock_vs_sector_divergence", 0) or 0)
+        same_track = overlap_level in ("高", "中")
+        if same_track and change_pct > 0:
+            resonance = "板块共振推升个股"
+        elif not same_track:
+            resonance = f"板块领涨与本公司主业重叠度{overlap_level}，个股{'独立走强' if divergence > 0 else '未跟涨板块'}"
+        else:
+            resonance = "板块拖累个股"
         sector_points.append({
             "subtitle": leader.get("type", "板块"),
-            "content": f"{leader.get('name')} 涨跌幅 {leader.get('change_pct'):+.2f}%，"
-            f"{'板块共振推升个股' if change_pct > 0 else '板块拖累个股'}",
+            "content": f"{leader.get('name')} 涨跌幅 {leader.get('change_pct'):+.2f}%，{resonance}",
             "evidence": "板块行情数据",
             "source_url": "",
+        })
+    for item in move_context.get("background_news") or [][:2]:
+        directness = str(item.get("directness", "indirect"))
+        label = "题材错配" if directness == "mismatch" else "板块背景"
+        sector_points.append({
+            "subtitle": label,
+            "content": f"{item.get('title')} — {item.get('impact_reason') or item.get('content', '')[:80]}",
+            "evidence": item.get("title", ""),
+            "source_url": item.get("url", ""),
         })
 
     tech_points = [{
@@ -304,31 +347,46 @@ def BuildRulePriceMoveFallback(move_context: dict[str, Any]) -> dict[str, Any]:
         "evidence": "A股常见题材节奏",
         "source_url": "",
     }]
-    if not points_catalyst:
+    mismatch_items = [
+        i for i in (move_context.get("background_news") or [])
+        if str(i.get("directness", "")) == "mismatch"
+    ]
+    if mismatch_items:
+        risk_points.append({
+            "subtitle": "题材错配",
+            "content": f"板块主线与本公司主业不符：{mismatch_items[0].get('title', '')}",
+            "evidence": "题材重叠度分析",
+            "source_url": "",
+        })
+    if len(move_context.get("impactful_news") or []) == 0:
         risk_points.append({
             "subtitle": "证据不足",
-            "content": "未采集到足够政策/资讯证据，归因可能不完整",
+            "content": "未采集到足够直接影响涨跌的个股资讯/政策证据，归因可能不完整",
             "evidence": "资讯采集结果",
             "source_url": "",
         })
 
     evidence_gaps: list[str] = []
-    if not points_catalyst:
-        evidence_gaps.append("缺少直接影响涨跌的资讯/政策证据")
+    if len(move_context.get("impactful_news") or []) == 0:
+        evidence_gaps.append("缺少直接影响涨跌的个股直接资讯/政策证据")
     if margin_chg == 0:
         evidence_gaps.append("融资融券变动数据不可用")
 
     primary = "mixed"
-    if points_catalyst:
+    direct_catalyst = [
+        i for i in (move_context.get("impactful_news") or [])
+        if str(i.get("impact", "")) in ("涨", "跌")
+    ]
+    if direct_catalyst:
         primary = "policy"
     elif sector_points:
         primary = "sector"
 
     headline = f"{'上涨' if direction == '涨' else '下跌' if direction == '跌' else '震荡'}{abs(change_pct):.2f}%"
-    if points_catalyst:
-        headline += "，资讯/政策驱动为主"
+    if direct_catalyst:
+        headline += "，个股直接资讯驱动为主"
     elif sector_points:
-        headline += "，板块共振为主"
+        headline += "，板块环境/分化为主"
     else:
         headline += "，技术/资金因素为主"
 

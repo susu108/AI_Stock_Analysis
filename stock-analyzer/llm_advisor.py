@@ -10,6 +10,7 @@ import requests
 
 import config
 from market_context import ResolvePredictionHorizon
+from news_context import ComputeSectorThemeOverlap, ComputeStockVsSectorDivergence
 from portfolio import CalcPortfolioSummary, FormatPortfolioText, PortfolioToDict
 from price_context import FormatPriceContextText
 from trade_zones import EnvelopeFromTradeZones, ParseTradePlanFromLlm
@@ -42,8 +43,9 @@ def _FormatNewsSection(
     lines = [f"【{title}】"]
     for i, item in enumerate(items[:max_count], 1):
         impact_tag = f"[{item.get('impact', '')}]" if item.get("impact") else ""
+        direct_tag = f"[{item.get('directness', '')}]" if item.get("directness") else ""
         lines.append(
-            f"{i}. {impact_tag}[{item.get('time', '')}] {item.get('title', '')} "
+            f"{i}. {direct_tag}{impact_tag}[{item.get('time', '')}] {item.get('title', '')} "
             f"（{item.get('source', '')}）"
         )
         if item.get("impact_reason"):
@@ -72,6 +74,16 @@ def BuildAnalysisContext(
         f"股票：{config.STOCK_NAME}({config.STOCK_CODE})",
         f"推送时段：{session_label}",
     ]
+    if config.STOCK_BUSINESS:
+        context_parts.append(f"公司主业/业绩：{config.STOCK_BUSINESS}")
+    if config.STOCK_THEMES:
+        context_parts.append(f"配置题材：{', '.join(config.STOCK_THEMES)}")
+    overlap = ComputeSectorThemeOverlap(data)
+    divergence = ComputeStockVsSectorDivergence(data)
+    context_parts.append(
+        f"概念领涨与题材重叠度：{overlap.get('overlap_level', '未知')}；"
+        f"个股相对概念均值偏离：{divergence:+.2f}%"
+    )
     horizon = base_advice.get("prediction_horizon") or ResolvePredictionHorizon(session_label)
     is_trading_day = horizon.get("is_trading_day", True)
     context_parts.extend([
@@ -196,20 +208,41 @@ def BuildAnalysisContext(
 
     relevant_news = bundle.get("relevant_items") or news_items
     if relevant_news:
-        context_parts.extend(["", "【有影响资讯 — 涨跌与买卖建议必须结合以下信息】"])
-        by_cat: dict[str, list[dict[str, Any]]] = {}
-        for item in relevant_news:
-            cat = item.get("category", "stock")
-            by_cat.setdefault(cat, []).append(item)
-        cat_labels = {
-            "stock": "个股资讯",
-            "sector": "板块/行业",
-            "policy": "政策/监管",
-            "macro": "宏观事件",
-        }
-        for cat, label in cat_labels.items():
-            if by_cat.get(cat):
-                context_parts.extend([""] + _FormatNewsSection(label, by_cat[cat], 6))
+        direct_news = [
+            i for i in relevant_news
+            if str(i.get("directness", "direct")) == "direct"
+        ]
+        background_news = [
+            i for i in relevant_news
+            if str(i.get("directness", "")) in ("indirect", "mismatch")
+        ]
+        if direct_news:
+            context_parts.extend([
+                "",
+                "【个股直接资讯 — 可引用为买卖依据】",
+                *_FormatNewsSection("个股直接", direct_news, 6)[1:],
+            ])
+        if background_news:
+            context_parts.extend([
+                "",
+                "【板块背景/题材错配 — 仅描述环境，不得等同个股利好】",
+                *_FormatNewsSection("板块背景", background_news, 6)[1:],
+            ])
+        if not direct_news and not background_news:
+            context_parts.extend(["", "【有影响资讯】"])
+            by_cat: dict[str, list[dict[str, Any]]] = {}
+            for item in relevant_news:
+                cat = item.get("category", "stock")
+                by_cat.setdefault(cat, []).append(item)
+            cat_labels = {
+                "stock": "个股资讯",
+                "sector": "板块/行业",
+                "policy": "政策/监管",
+                "macro": "宏观事件",
+            }
+            for cat, label in cat_labels.items():
+                if by_cat.get(cat):
+                    context_parts.extend([""] + _FormatNewsSection(label, by_cat[cat], 6))
 
     return "\n".join(context_parts)
 
@@ -251,8 +284,9 @@ def _BuildSystemPrompt(mode: str = "daily") -> str:
         "breakdown_level/breakdown_next_support/breakdown_action（跌破关键支撑后的应对）；"
         "pricing_rationale（字符串，80字以内，说明四档如何结合K线、资讯确定）；"
         "news_summary（字符串，150字以内）；"
-        "sector_impact（字符串，80字以内）；"
-        "policy_impact（字符串，120字以内，政策类资讯须完整提炼要点）；"
+        "sector_impact（字符串，80字以内，仅描述板块/行业环境，不得写「利好个股」）；"
+        "policy_impact（字符串，120字以内，须判断政策受益主体是本公司还是行业龙头）；"
+        "theme_mismatch_note（字符串，80字以内，板块主线与本公司主业/题材不符时说明，无则空串）；"
         "news_impact（字符串，80字以内）；"
         "near_term_direction（枚举：看涨/看跌/震荡偏涨/震荡偏跌/震荡）；"
         "near_term_change_low（数字，近端涨跌幅下限%，如-1.5）；"
@@ -267,12 +301,15 @@ def _BuildSystemPrompt(mode: str = "daily") -> str:
         "long_term_advice（字符串，60字以内，长期操作建议）；"
         "direction_prediction（字符串，80字以内，与near_term_prediction一致，兼容字段）；"
         "news_conclusion（字符串，150字以内，资讯综合建议：置于资讯解读末尾，"
-        f"须综合全部利好/利空/政策/板块资讯，给出对{stock}短期操作的明确结论与注意事项）。"
+        f"须回答板块涨但个股是否跟涨、为何分化；综合全部利好/利空/政策/板块资讯，"
+        f"给出对{stock}短期操作的明确结论与注意事项）。"
         "分析原则："
         "1. 近端/短期/长期三层预测与买卖建议必须综合K线信号与有影响资讯；"
         "2. 开盘前/收盘后/非交易日：near_term 针对下一交易日；盘中：near_term 针对今日剩余时段至收盘；"
         "3. 非交易日须结合休市期间政策/公告/板块资讯预判下一交易日开盘及首日走势；"
-        "4. news_score 不为 0 时，near_term_prediction/strategy/buy_reasons 至少引用一条资讯或政策要点，不可纯 K 线；"
+        "4. news_score 不为 0 时，near_term_prediction/strategy/buy_reasons 至少引用一条"
+        "【个股直接】资讯或政策要点，不可将【板块背景】等同个股利好；"
+        "5. sector_impact 只描述板块环境；板块涨而个股弱时必须写 theme_mismatch_note；"
         "5. 第一加仓=深支撑/箱体中枢（优先等待），第二加仓=浅回调/VWAP（次选，限制更严）；"
         "6. 须输出 risk_warning、四档参考区间及 logic/rules/stop、每档 _best 最推荐单点价、no_add_zones、trade_discipline；"
         "7. buy/sell 四价为包络：buy_price_low=add_tier1_low，buy_price_high=add_tier2_high；"
@@ -749,6 +786,7 @@ def EnhanceAdviceWithLlm(
     base_advice["news_summary"] = str(llm_result.get("news_summary", "")).strip()
     base_advice["sector_impact"] = str(llm_result.get("sector_impact", "")).strip()
     base_advice["policy_impact"] = str(llm_result.get("policy_impact", "")).strip()
+    base_advice["theme_mismatch_note"] = str(llm_result.get("theme_mismatch_note", "")).strip()
     base_advice["news_impact"] = str(llm_result.get("news_impact", "")).strip()
     predictions = ParsePredictionsFromLlm(llm_result, horizon, analysis)
     base_advice["predictions"] = predictions

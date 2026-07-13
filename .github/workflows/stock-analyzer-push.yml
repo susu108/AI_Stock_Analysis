@@ -69,6 +69,8 @@ jobs:
           WEB_SEARCH_ENABLED: ${{ vars.WEB_SEARCH_ENABLED }}
           WEB_SEARCH_API_KEY: ${{ secrets.WEB_SEARCH_API_KEY }}
           STOCK_THEMES: ${{ vars.STOCK_THEMES }}
+          STOCK_BUSINESS: ${{ vars.STOCK_BUSINESS }}
+          DINGTALK_REPORT_MODE: ${{ vars.DINGTALK_REPORT_MODE }}
         run: |
           cat > .env << EOF
           DINGTALK_WEBHOOK=${DINGTALK_WEBHOOK}
@@ -78,6 +80,7 @@ jobs:
           STOCK_MARKET=${STOCK_MARKET:-sz}
           PUSH_TIMES=09:00,11:30,14:30
           MANUAL_RUN=false
+          ENABLE_LOCAL_SCHEDULER=false
           KLINE_DAYS=60
           LOG_LEVEL=INFO
           LLM_ENABLED=${LLM_ENABLED:-true}
@@ -89,7 +92,10 @@ jobs:
           WEB_SEARCH_PROVIDER=tavily
           WEB_SEARCH_API_KEY=${WEB_SEARCH_API_KEY}
           STOCK_THEMES=${STOCK_THEMES:-GLP-1,司美格鲁肽,多肽原料药}
+          STOCK_BUSINESS=${STOCK_BUSINESS:-}
+          DINGTALK_REPORT_MODE=${DINGTALK_REPORT_MODE:-compact}
           PRICE_MOVE_MIN_PCT=2.0
+          REPORT_WEB_ENABLED=false
           EOF
 
       - name: Resolve push_time

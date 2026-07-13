@@ -18,7 +18,7 @@ from dingtalk_pusher import (
     ResolveTradeDisplayLevels,
 )
 from market_context import ResolvePredictionHorizon, ResolveSessionAndHorizon
-from news_analyzer import AnalyzeNewsImpact, CalcNewsScore
+from news_analyzer import AnalyzeNewsImpact, CalcNewsScore, GetBackgroundNewsItems
 
 
 def BuildMockKline(days: int = 60) -> pd.DataFrame:
@@ -320,7 +320,7 @@ def RunHorizonResolverTests(
         and "下交易日预测" in sat_report
         and "预测对象" in sat_report
         and "休市中" in sat_report
-        and "资讯综合" in sat_report
+        and "资讯研判" in sat_report
         and "休市期间政策面偏暖" in sat_report
     )
     return sat_ok, fri_ok, sat_dingtalk_ok
@@ -366,6 +366,131 @@ def RunTailHorizonTest() -> bool:
     )
 
 
+def RunThemeMismatchTest() -> bool:
+    """验证板块/政策 GLP-1 资讯不会被误标为个股利好。"""
+    saved_themes = list(config.STOCK_THEMES)
+    saved_business = config.STOCK_BUSINESS
+    saved_llm = config.LLM_ENABLED
+    try:
+        config.STOCK_THEMES = ["GLP-1", "司美格鲁肽", "多肽原料药"]
+        config.STOCK_BUSINESS = (
+            "主营补液注射液；多肽/GLP-1业务刚起步、收入规模小、无海外长协大单"
+        )
+        config.LLM_ENABLED = False
+
+        data = {
+            "realtime": BuildMockRealtime(),
+            "kline": BuildMockKline(),
+            "concept": BuildMockConceptBoards(),
+            "industry": BuildMockIndustryBoards(),
+            "fund_flow": BuildMockFundFlow(),
+        }
+        news_bundle = AnalyzeNewsImpact(BuildMockNews(), data)
+        relevant = list(news_bundle.get("relevant_items") or [])
+
+        policy_glp1 = [
+            i for i in relevant
+            if i.get("category") == "policy" and "基药目录" in str(i.get("title", ""))
+        ]
+        web_glp1 = [
+            i for i in relevant
+            if i.get("category") == "web_search" and "GLP-1" in str(i.get("title", ""))
+        ]
+        sector_items = [i for i in relevant if i.get("category") == "sector"]
+
+        mismatch_ok = all(
+            str(i.get("directness", "")) in ("indirect", "mismatch")
+            and i.get("impact") != "涨"
+            for i in policy_glp1 + web_glp1 + sector_items
+        )
+
+        news_score, _ = CalcNewsScore(relevant)
+        score_ok = news_score <= 5
+
+        advice = GenerateAdvice(
+            AnalyzeAll(data),
+            data,
+            news_items=news_bundle["items"],
+            news_bundle=news_bundle,
+            session_label="收盘后",
+            mode="daily",
+            prediction_horizon=ResolvePredictionHorizon("收盘后"),
+        )
+        advice["news_summary"] = "医药板块活跃，但个股主业与领涨方向存在分化"
+        report = BuildDingTalkReportMarkdown(
+            data, AnalyzeAll(data), advice,
+            session_label="收盘后",
+            report_mode="daily",
+        )
+        no_false_bullish = (
+            "利好** GLP-1" not in report
+            and "利好** 产业链受益" not in report
+            and (
+                "产业链受益" not in report.split("资讯研判")[1].split("买卖建议")[0]
+                if "资讯研判" in report and "买卖建议" in report
+                else "产业链受益" not in report
+            )
+        )
+        background_ok = bool(GetBackgroundNewsItems(relevant)) or bool(
+            i for i in relevant if str(i.get("directness", "")) == "mismatch"
+        )
+
+        return mismatch_ok and score_ok and no_false_bullish and background_ok
+    finally:
+        config.STOCK_THEMES = saved_themes
+        config.STOCK_BUSINESS = saved_business
+        config.LLM_ENABLED = saved_llm
+
+
+def RunCompactModeTest(report: str) -> bool:
+    """验证精简版钉钉报告结构。"""
+    news_idx = report.find("、资讯研判")
+    trade_idx = report.find("、买卖建议")
+    move_idx = report.find("、涨跌归因")
+    return (
+        "分层预测" in report
+        and "、资讯研判" in report
+        and "盘面信号" in report
+        and "、涨跌归因" in report
+        and "综合结论" in report
+        and "四维评分" in report
+        and "个股直接利好" in report
+        and "详细依据" not in report
+        and "资讯解读" not in report
+        and "【个股资讯】" not in report
+        and news_idx >= 0
+        and trade_idx > news_idx
+        and move_idx > trade_idx
+    )
+
+
+def RunFullModeTest(
+    data: dict[str, Any],
+    analysis: dict[str, Any],
+    advice: dict[str, Any],
+) -> bool:
+    """验证 full 模式仍输出完整长报告。"""
+    saved_mode = config.DINGTALK_REPORT_MODE
+    try:
+        config.DINGTALK_REPORT_MODE = "full"
+        full_report = BuildDingTalkReportMarkdown(
+            data, analysis, advice,
+            session_label="收盘后",
+            report_mode="daily",
+        )
+        price_move = advice.get("price_move") or {}
+        return (
+            "综合预测" in full_report
+            and "详细依据" in full_report
+            and "资讯解读" in full_report
+            and "涨跌归因拆解" in full_report
+            and "【个股资讯】" in full_report
+            and bool(price_move.get("dimensions"))
+        )
+    finally:
+        config.DINGTALK_REPORT_MODE = saved_mode
+
+
 def RunMockTest() -> None:
     """运行模拟测试，打印完整 Markdown 报告。"""
     print("=" * 60)
@@ -378,7 +503,11 @@ def RunMockTest() -> None:
     ]
     config.LLM_ENABLED = False
     config.STOCK_THEMES = ["GLP-1", "司美格鲁肽", "多肽原料药"]
+    config.STOCK_BUSINESS = (
+        "主营补液注射液；多肽/GLP-1业务刚起步、收入规模小、无海外长协大单"
+    )
     config.PRICE_MOVE_MIN_PCT = 2.0
+    config.DINGTALK_REPORT_MODE = "compact"
 
     data = {
         "realtime": BuildMockRealtime(),
@@ -401,15 +530,9 @@ def RunMockTest() -> None:
         title = str(item.get("title", ""))
         if item.get("category") == "stock" and "注册证书" in title:
             item["impact"] = "涨"
+            item["directness"] = "direct"
             item["strength"] = 4
-        elif item.get("category") == "policy" and "基药目录" in title:
-            item["impact"] = "涨"
-            item["strength"] = 5
-            item["impact_reason"] = "GLP-1标杆药纳入基药，产业链受益"
-        elif item.get("category") == "web_search" and "GLP-1" in title:
-            item["impact"] = "涨"
-            item["strength"] = 4
-            item["impact_reason"] = "题材匹配GLP-1上游原料药"
+            item["impact_reason"] = "子公司获药品注册证书，直接利好本公司"
     news_score, news_signals = CalcNewsScore(news_bundle.get("relevant_items", []))
     news_bundle["news_score"] = news_score
     news_bundle["news_signals"] = news_signals
@@ -427,8 +550,9 @@ def RunMockTest() -> None:
         prediction_horizon=ResolvePredictionHorizon("收盘后"),
     )
 
-    advice["news_summary"] = "政策面偏暖，GLP-1产业链受益，下一交易日关注开盘承接"
-    advice["policy_impact"] = "司美格鲁肽纳入基药目录，产业链受益"
+    advice["news_summary"] = "子公司获注册证书为个股直接利好；医药板块活跃但主线与本公司主业存在分化"
+    advice["policy_impact"] = "基药目录调整利好行业龙头，本公司补液主业传导有限"
+    advice["theme_mismatch_note"] = "今日领涨中药/家用医疗，与补液注射液主业赛道割裂"
 
     report = BuildDingTalkReportMarkdown(
         data, analysis, advice,
@@ -444,24 +568,20 @@ def RunMockTest() -> None:
     has_portfolio_section = "持仓与回本" in report
     stats = news_bundle.get("impact_stats", {})
     by_cat = stats.get("by_category", {})
-    four_dim_sections = [
-        "【个股资讯】",
-        "【板块/行业】",
-        "【政策/监管】",
-        "【宏观事件】",
-    ]
-    sections_ok = all(section in report for section in four_dim_sections)
     categories_ok = all(by_cat.get(k, 0) > 0 for k in ("stock", "sector", "policy", "macro"))
+    compact_ok = RunCompactModeTest(report)
+    full_mode_ok = RunFullModeTest(data, analysis, advice)
     print(f"定价校验: 买入<{price}<卖出 → {'通过' if buy_ok else '失败'}")
     print(f"日常报告含持仓章节: {'否（正确）' if not has_portfolio_section else '是（错误）'}")
     print(f"相关资讯: {stats}")
-    print(f"四维分节可见: {'通过' if sections_ok else '失败'}")
+    print(f"精简版章节结构: {'通过' if compact_ok else '失败'}")
+    print(f"完整版模式(full): {'通过' if full_mode_ok else '失败'}")
     print(f"四维分类计数: {'通过' if categories_ok else '失败'} — {by_cat}")
     news_merge_ok = (
         analysis.get("news_score", 0) != 0
         and analysis.get("weighted_score") != base_weighted
-        and "资讯" in report
-        and "（15%）" in report
+        and "资讯研判" in report
+        and "四维评分" in report
     )
     print(f"资讯面融合: {'通过' if news_merge_ok else '失败'} — news_score={analysis.get('news_score')}, weighted={analysis.get('weighted_score'):+.1f}")
     trade_format_ok = (
@@ -499,7 +619,7 @@ def RunMockTest() -> None:
           f"加一={at1.get('low')}~{at1.get('high')} 加二={at2.get('low')}~{at2.get('high')}")
     print(f"支撑压力一致性: {'通过' if levels_ok else '失败'} — S1={levels['s1']} S2={levels['s2']} stop={levels['stop_loss']}")
     layered_ok = (
-        "综合预测" in report
+        "分层预测" in report
         and VerifyLayeredPredictions(report, "明日预测")
         and advice.get("predictions", {}).get("near_term")
         and advice.get("predictions", {}).get("short_term")
@@ -527,38 +647,28 @@ def RunMockTest() -> None:
     tail_horizon_ok = RunTailHorizonTest()
     print(f"盘中K线融合: {'通过' if kline_merge_ok else '失败'}")
     print(f"尾盘Horizon: {'通过' if tail_horizon_ok else '失败'}")
-    news_brief_ok = "资讯综合" in report and "GLP-1产业链受益" in report
-    news_idx = report.find("资讯综合")
-    score_idx = report.find("四维评分")
-    catalyst_idx = report.find("涨跌归因拆解")
-    news_brief_pos_ok = (
-        news_idx >= 0
-        and score_idx > news_idx
-        and catalyst_idx > score_idx
-    )
-    print(f"钉钉资讯综合块: {'通过' if news_brief_ok else '失败'}")
-    print(f"章节顺序（资讯综合→四维评分→涨跌归因）: {'通过' if news_brief_pos_ok else '失败'}")
+    theme_mismatch_ok = RunThemeMismatchTest()
+    print(f"题材错配分层: {'通过' if theme_mismatch_ok else '失败'}")
 
-    price_move = advice.get("price_move") or {}
-    full_modules_ok = (
-        "涨跌归因拆解" in report
-        and "详细依据" in report
-        and "资讯解读" in report
-        and "完整深度报告" not in report
-        and "【个股资讯】" in report
-        and price_move.get("dimensions")
+    news_judge_ok = (
+        "资讯研判" in report
+        and "个股直接利好" in report
+        and (
+            "产业链受益" not in report.split("资讯研判")[1].split("买卖建议")[0]
+            if "资讯研判" in report and "买卖建议" in report
+            else "产业链受益" not in report
+        )
     )
-    print(
-        f"钉钉完整模块: {'通过' if full_modules_ok else '失败'}"
-        f" — source={price_move.get('source')}"
-    )
+    print(f"钉钉资讯研判块: {'通过' if news_judge_ok else '失败'}")
 
     if (
-        not sections_ok or not categories_ok or not news_merge_ok
+        not categories_ok or not news_merge_ok
         or not trade_format_ok or not levels_ok or not layered_ok
-        or not pre_ok or not intraday_ok or not full_modules_ok
-        or not sat_ok or not fri_ok or not sat_dingtalk_ok or not news_brief_ok
-        or not news_brief_pos_ok or not kline_merge_ok or not tail_horizon_ok
+        or not pre_ok or not intraday_ok
+        or not sat_ok or not fri_ok or not sat_dingtalk_ok
+        or not compact_ok or not full_mode_ok
+        or not kline_merge_ok or not tail_horizon_ok
+        or not theme_mismatch_ok or not news_judge_ok
     ):
         raise SystemExit(1)
 

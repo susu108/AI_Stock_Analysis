@@ -18,6 +18,7 @@ from market_context import ResolveSessionAndHorizon
 from news_analyzer import AnalyzeNewsImpact
 from news_fetcher import FetchNews, FlattenNewsItems
 from portfolio_advisor import GeneratePortfolioAdvice
+from scheduler_guard import ReleasePushSlot, TryAcquireSchedulerLock, TryClaimPushSlot
 from utils import NowStr, SetupLogger
 
 logger = SetupLogger(config.LOG_LEVEL)
@@ -43,6 +44,11 @@ def ParseArgs() -> argparse.Namespace:
         "--portfolio", "-p",
         action="store_true",
         help="立即生成分账户持仓建议并推送",
+    )
+    parser.add_argument(
+        "--local-scheduler",
+        action="store_true",
+        help="显式启用本地常驻定时调度（默认关闭，请用 GitHub Actions）",
     )
     parser.add_argument(
         "--scheduled",
@@ -134,12 +140,20 @@ def Job(
             mode="daily",
             prediction_horizon=horizon,
         )
+
+        if not force_run and not TryClaimPushSlot(push_time, display_label):
+            logger.info("本时段推送已由其他实例完成，跳过")
+            return
+
         success = PushReport(
             data, analysis, advice,
             session_label=display_label,
             report_mode="daily",
             push_time=push_time,
         )
+
+        if not success and not force_run:
+            ReleasePushSlot(push_time, display_label)
 
         if success:
             logger.info("日常分析完成，报告已推送")
@@ -193,9 +207,16 @@ def JobPortfolio(force_run: bool = True) -> None:
 
 def RunScheduler() -> None:
     """启动定时调度，支持多次推送。"""
+    if not TryAcquireSchedulerLock():
+        sys.exit(1)
+
     push_times = config.PUSH_TIMES
     logger.info("定时模式启动，每日推送时间点: %s", ", ".join(push_times))
-    logger.info("手动: python main.py --now ｜ 持仓: python main.py --portfolio")
+    logger.info("手动: python main.py --now ｜ 持仓: python main.py --portfolio（已暂停）")
+    logger.info(
+        "若已配置 cron-job.org 触发 GitHub Actions，请勿同时运行本地定时调度，"
+        "否则同一时刻会重复推送。"
+    )
 
     for push_time in push_times:
         label = GetSessionLabel(push_time)
@@ -244,8 +265,17 @@ def Main() -> None:
 
     if is_manual:
         Job(force_run=True)
-    else:
+        return
+
+    if args.local_scheduler or config.ENABLE_LOCAL_SCHEDULER:
         RunScheduler()
+        return
+
+    logger.info(
+        "本地定时调度已关闭（方案 A：由 cron-job.org → GitHub Actions 推送）。"
+        "手动推送: python main.py --now ｜ "
+        "如需本地常驻调度: python main.py --local-scheduler 或 .env 设 ENABLE_LOCAL_SCHEDULER=true"
+    )
 
 
 if __name__ == "__main__":

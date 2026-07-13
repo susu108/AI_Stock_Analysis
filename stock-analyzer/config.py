@@ -62,6 +62,14 @@ def _ParseCsvList(raw: str | None) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
+def _ParseReportMode(raw: str | None) -> str:
+    """解析钉钉报告模式，仅允许 compact / full。"""
+    mode = (raw or "compact").strip().lower()
+    if mode in ("compact", "full"):
+        return mode
+    return "compact"
+
+
 DINGTALK_WEBHOOK: str = os.getenv("DINGTALK_WEBHOOK", "")
 DINGTALK_SECRET: str = os.getenv("DINGTALK_SECRET", "")
 STOCK_CODE: str = os.getenv("STOCK_CODE", "301075")
@@ -70,6 +78,8 @@ STOCK_MARKET: str = os.getenv("STOCK_MARKET", "sz")
 PUSH_TIME: str = os.getenv("PUSH_TIME", "09:00")
 PUSH_TIMES: list[str] = _ParsePushTimes()
 MANUAL_RUN: bool = _ParseBool(os.getenv("MANUAL_RUN"), False)
+# false=定时由 GitHub Actions/cron-job 推送；true=允许本地 python main.py 常驻调度
+ENABLE_LOCAL_SCHEDULER: bool = _ParseBool(os.getenv("ENABLE_LOCAL_SCHEDULER"), False)
 KLINE_DAYS: int = _ParseInt(os.getenv("KLINE_DAYS"), 60)
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
@@ -87,10 +97,14 @@ WEB_SEARCH_ENABLED: bool = _ParseBool(os.getenv("WEB_SEARCH_ENABLED"), False)
 WEB_SEARCH_PROVIDER: str = os.getenv("WEB_SEARCH_PROVIDER", "tavily").strip().lower()
 WEB_SEARCH_API_KEY: str = os.getenv("WEB_SEARCH_API_KEY", "")
 STOCK_THEMES: list[str] = _ParseCsvList(os.getenv("STOCK_THEMES"))
+STOCK_BUSINESS: str = os.getenv("STOCK_BUSINESS", "").strip()
 WEB_SEARCH_CACHE_HOURS: int = _ParseInt(os.getenv("WEB_SEARCH_CACHE_HOURS"), 4)
 
 # 涨跌归因：涨跌幅低于阈值且无量能异常时输出简版
 PRICE_MOVE_MIN_PCT: float = _ParseFloat(os.getenv("PRICE_MOVE_MIN_PCT"), 2.0)
+
+# 钉钉报告模式：compact=分析结论优先（默认）；full=完整长报告
+DINGTALK_REPORT_MODE: str = _ParseReportMode(os.getenv("DINGTALK_REPORT_MODE"))
 
 # 网页详细报告（GitHub Pages / jsDelivr CDN）
 REPORT_WEB_ENABLED: bool = _ParseBool(os.getenv("REPORT_WEB_ENABLED"), False)

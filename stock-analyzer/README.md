@@ -101,17 +101,21 @@ python main.py --portfolio
 - 含回本路径、减亏/做T策略
 - 仅推送持仓专报，不含日常分析
 
-## 定时推送
+## 定时推送（方案 A：推荐）
+
+**默认由 cron-job.org → GitHub Actions 推送**，本地不要 `nohup python main.py`。
 
 ```env
 MANUAL_RUN=false
+ENABLE_LOCAL_SCHEDULER=false
 ```
 
-```bash
-nohup python3 main.py > stock_analyzer.log 2>&1 &
-```
+| 场景 | 命令 |
+|------|------|
+| 手动即时推送 | `python main.py --now` |
+| 本地常驻调度（不推荐） | `python main.py --local-scheduler` |
 
-定时任务仅推送**日常分析**（不含持仓）。持仓建议需手动执行 `--portfolio`。
+定时任务仅推送**日常分析**（不含持仓专报）。
 
 ## GitHub Actions 定时推送
 
@@ -143,9 +147,10 @@ git push -u origin main
 | Variable | `STOCK_CODE` | 可选，默认 301075 |
 | Variable | `STOCK_NAME` | 可选，默认 多瑞生物 |
 | Variable | `STOCK_THEMES` | 可选，如 `GLP-1,司美格鲁肽,多肽原料药` |
+| Variable | `STOCK_BUSINESS` | 可选，公司主业简述（题材错配判断） |
+| Variable | `DINGTALK_REPORT_MODE` | 可选，`compact`（默认）或 `full` |
 | Variable | `WEB_SEARCH_ENABLED` | 可选，`true` 启用联网搜索 |
-| Variable | `REPORT_WEB_ENABLED` | 可选，`true` 生成网页报告 |
-| Variable | `REPORT_WEB_BASE_URL` | 可选，GitHub Pages 报告 URL 前缀 |
+| Variable | `REPORT_WEB_ENABLED` | 已停用，保持 `false` |
 | Variable | `LLM_ENABLED` | 可选，`true` / `false` |
 
 ### 3. 调度时间

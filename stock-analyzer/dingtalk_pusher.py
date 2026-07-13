@@ -288,6 +288,10 @@ def _BuildComprehensivePredictionSection(
     analysis: dict[str, Any],
     advice: dict[str, Any],
     ai_tag: str,
+    *,
+    include_news: bool = True,
+    include_scores: bool = True,
+    include_near_target: bool = True,
 ) -> list[str]:
     """构建 AI 分层综合预测章节。"""
     predictions = advice.get("predictions") or {}
@@ -322,7 +326,7 @@ def _BuildComprehensivePredictionSection(
         f"（{horizon.get('session_label', '')}）",
     ]
     near_target = str(horizon.get("near_term_target", "")).strip()
-    if near_target:
+    if include_near_target and near_target:
         lines.append(f"- **预测对象** {near_target}")
     lines.append(f"- **量化综合** {_EmScore(weighted, 1)}")
     if near:
@@ -332,20 +336,22 @@ def _BuildComprehensivePredictionSection(
     if long_t:
         lines.extend(_BuildPredictionTierBlock(long_t))
 
-    news_brief = _BuildNewsBriefSection(advice, ai_tag)
-    if news_brief:
-        lines.extend(news_brief)
+    if include_news:
+        news_brief = _BuildNewsBriefSection(advice, ai_tag)
+        if news_brief:
+            lines.extend(news_brief)
 
-    lines.extend([
-        "",
-        "**四维评分（量化参考）**",
-        _ScoreBar("技术", tech_score, 35),
-        _ScoreBar("资金", fund_score, 30),
-        _ScoreBar("板块", sector_score, 20),
-        _ScoreBar("资讯", news_score, 15),
-        "",
-    ])
-    if news_signals:
+    if include_scores:
+        lines.extend([
+            "",
+            "**四维评分（量化参考）**",
+            _ScoreBar("技术", tech_score, 35),
+            _ScoreBar("资金", fund_score, 30),
+            _ScoreBar("板块", sector_score, 20),
+            _ScoreBar("资讯", news_score, 15),
+            "",
+        ])
+    if include_news and news_signals:
         lines.extend(["**关键资讯**"])
         for signal in news_signals[:3]:
             text = str(signal).strip()
@@ -365,14 +371,23 @@ def _BuildNewsBriefSection(
     policy_impact = str(advice.get("policy_impact", "")).strip()
     news_impact = str(advice.get("news_impact", "")).strip()
     news_conclusion = str(advice.get("news_conclusion", "")).strip()
+    theme_mismatch_note = str(advice.get("theme_mismatch_note", "")).strip()
 
     news_bundle = advice.get("news_bundle") or {}
     relevant_items: list[dict[str, Any]] = list(
         news_bundle.get("relevant_items")
         or news_bundle.get("scored_items", [])
     )
-    bullish = [i for i in relevant_items if i.get("impact") == "涨"]
-    bearish = [i for i in relevant_items if i.get("impact") == "跌"]
+    direct_bullish = [
+        i for i in relevant_items
+        if i.get("impact") == "涨" and str(i.get("directness", "direct")) == "direct"
+    ]
+    direct_bearish = [
+        i for i in relevant_items
+        if i.get("impact") == "跌" and str(i.get("directness", "direct")) == "direct"
+    ]
+    indirect_items = [i for i in relevant_items if str(i.get("directness", "")) == "indirect"]
+    mismatch_items = [i for i in relevant_items if str(i.get("directness", "")) == "mismatch"]
 
     horizon = advice.get("prediction_horizon") or {}
     is_trading_day = bool(horizon.get("is_trading_day", True))
@@ -385,7 +400,9 @@ def _BuildNewsBriefSection(
 
     has_content = bool(
         news_summary or sector_impact or policy_impact
-        or news_impact or news_conclusion or bullish or bearish or move_headline
+        or news_impact or news_conclusion or theme_mismatch_note
+        or direct_bullish or direct_bearish
+        or indirect_items or mismatch_items or move_headline
     )
     if not has_content:
         return []
@@ -397,19 +414,31 @@ def _BuildNewsBriefSection(
         lines.append(f"- **政策** {_TruncateText(policy_impact, 120)}")
     if sector_impact:
         lines.append(f"- **板块** {_TruncateText(sector_impact, 80)}")
+    if theme_mismatch_note:
+        lines.append(f"- **题材错配** {_TruncateText(theme_mismatch_note, 80)}")
     conclusion = news_impact or news_conclusion
     if conclusion:
         lines.append(f"- **方向** {_TruncateText(conclusion, 100)}")
-    if bullish:
-        item = bullish[0]
+    if direct_bullish:
+        item = direct_bullish[0]
         reason = str(item.get("impact_reason") or item.get("title", "")).strip()
         if reason:
-            lines.append(f"- **利好** {_TruncateText(reason, 80)}")
-    if bearish:
-        item = bearish[0]
+            lines.append(f"- **个股直接利好** {_TruncateText(reason, 80)}")
+    if direct_bearish:
+        item = direct_bearish[0]
         reason = str(item.get("impact_reason") or item.get("title", "")).strip()
         if reason:
-            lines.append(f"- **利空** {_TruncateText(reason, 80)}")
+            lines.append(f"- **个股直接利空** {_TruncateText(reason, 80)}")
+    if indirect_items:
+        item = indirect_items[0]
+        reason = str(item.get("impact_reason") or item.get("title", "")).strip()
+        if reason:
+            lines.append(f"- **板块背景** {_TruncateText(reason, 80)}")
+    if mismatch_items:
+        item = mismatch_items[0]
+        reason = str(item.get("impact_reason") or item.get("title", "")).strip()
+        if reason:
+            lines.append(f"- **题材错配警示** {_TruncateText(reason, 80)}")
     if move_headline:
         label = "上日涨跌" if not is_trading_day else "涨跌主因"
         lines.append(f"- **{label}** {_TruncateText(move_headline, 100)}")
@@ -464,9 +493,28 @@ def _ImpactSectionTitle(title: str, impact: str) -> str:
     return f"**{title}**"
 
 
+def _DirectnessBadge(directness: str) -> str:
+    """影响直接性徽章。"""
+    if directness == "direct":
+        return '<font color="#E53935">**个股直接**</font>'
+    if directness == "mismatch":
+        return '<font color="#FF9800">**题材错配**</font>'
+    if directness == "indirect":
+        return '<font color="#9E9E9E">**板块背景**</font>'
+    return ""
+
+
 def _HasDirectPriceImpact(item: dict[str, Any]) -> bool:
-    """判断资讯是否对股价有明确涨跌影响。"""
-    return str(item.get("impact", "")) in ("涨", "跌")
+    """判断资讯是否对股价有明确涨跌影响（仅 directness=direct）。"""
+    return (
+        str(item.get("impact", "")) in ("涨", "跌")
+        and str(item.get("directness", "direct")) == "direct"
+    )
+
+
+def _IsBackgroundNews(item: dict[str, Any]) -> bool:
+    """判断是否为板块背景或题材错配资讯。"""
+    return str(item.get("directness", "")) in ("indirect", "mismatch")
 
 
 _NO_DIRECT_IMPACT_COPY: dict[str, str] = {
@@ -519,6 +567,8 @@ def _TitleMaxLen(category: str) -> int:
 def _FormatNewsItemBlock(
     item: dict[str, Any],
     index: int,
+    *,
+    show_directness: bool = False,
 ) -> list[str]:
     """格式化单条资讯（统一卡片样式）。"""
     cat = str(item.get("category", "stock"))
@@ -526,11 +576,15 @@ def _FormatNewsItemBlock(
     title = _TruncateText(str(item.get("title", "")), _TitleMaxLen(cat))
     source = str(item.get("source", "")).strip()
     impact = str(item.get("impact", "中性"))
+    directness = str(item.get("directness", ""))
     impact_badge = _ImpactBadge(impact)
+    directness_badge = _DirectnessBadge(directness) if show_directness and directness else ""
+    badge_parts = [b for b in (directness_badge, impact_badge) if b]
+    badge_str = " ".join(badge_parts) if badge_parts else impact_badge
     time_part = f"`{time_tag}` " if time_tag else ""
     source_part = f"（{source}）" if source else ""
     lines = [
-        f"- **{index}.** {impact_badge}  {time_part}**{title}**{source_part}",
+        f"- **{index}.** {badge_str}  {time_part}**{title}**{source_part}",
     ]
 
     reason = str(item.get("impact_reason", "")).strip()
@@ -598,14 +652,23 @@ def _BuildNewsByCategorySections(
             lines.append(f"**{section_title}**（{len(display_items)}条有影响）")
             lines.append("")
             for i, item in enumerate(display_items, 1):
-                lines.extend(_FormatNewsItemBlock(item, i))
+                lines.extend(_FormatNewsItemBlock(item, i, show_directness=True))
                 lines.append("")
-            continue
+        else:
+            background = [i for i in deduped if _IsBackgroundNews(i)]
+            if background:
+                display_items = background[:limit]
+                lines.append(f"**{section_title}**（板块背景参考 {len(display_items)}条）")
+                lines.append("")
+                for i, item in enumerate(display_items, 1):
+                    lines.extend(_FormatNewsItemBlock(item, i, show_directness=True))
+                    lines.append("")
+                continue
 
-        no_impact_copy = _NO_DIRECT_IMPACT_COPY.get(cat_key, "暂无直接影响该股价涨跌的事件")
-        lines.append(f"**{section_title}**")
-        lines.append(f"- {no_impact_copy}（共采集 {len(deduped)} 条）")
-        lines.append("")
+            no_impact_copy = _NO_DIRECT_IMPACT_COPY.get(cat_key, "暂无直接影响该股价涨跌的事件")
+            lines.append(f"**{section_title}**")
+            lines.append(f"- {no_impact_copy}（共采集 {len(deduped)} 条）")
+            lines.append("")
     return lines
 
 
@@ -613,22 +676,42 @@ def _BuildKeyImpactHighlights(
     relevant_items: list[dict[str, Any]],
     limit: int = 3,
 ) -> list[str]:
-    """构建跨维度重点利好/利空精选。"""
-    bullish = sorted(
-        [i for i in relevant_items if i.get("impact") == "涨"],
+    """构建跨维度重点利好/利空精选（按 directness 分层）。"""
+    direct_bullish = sorted(
+        [
+            i for i in relevant_items
+            if i.get("impact") == "涨" and str(i.get("directness", "direct")) == "direct"
+        ],
         key=lambda x: x.get("strength", 0),
         reverse=True,
     )
-    bearish = sorted(
-        [i for i in relevant_items if i.get("impact") == "跌"],
+    direct_bearish = sorted(
+        [
+            i for i in relevant_items
+            if i.get("impact") == "跌" and str(i.get("directness", "direct")) == "direct"
+        ],
+        key=lambda x: x.get("strength", 0),
+        reverse=True,
+    )
+    indirect_items = sorted(
+        [i for i in relevant_items if str(i.get("directness", "")) == "indirect"],
+        key=lambda x: x.get("strength", 0),
+        reverse=True,
+    )
+    mismatch_items = sorted(
+        [i for i in relevant_items if str(i.get("directness", "")) == "mismatch"],
         key=lambda x: x.get("strength", 0),
         reverse=True,
     )
     lines: list[str] = []
-    if bullish:
-        lines.extend(_BuildNewsGroupSection("重点利好", bullish, limit=limit, impact="涨"))
-    if bearish:
-        lines.extend(_BuildNewsGroupSection("重点利空", bearish, limit=limit, impact="跌"))
+    if direct_bullish:
+        lines.extend(_BuildNewsGroupSection("重点利好（个股直接）", direct_bullish, limit=limit, impact="涨"))
+    if direct_bearish:
+        lines.extend(_BuildNewsGroupSection("重点利空（个股直接）", direct_bearish, limit=limit, impact="跌"))
+    if indirect_items:
+        lines.extend(_BuildNewsGroupSection("板块背景（非个股利好）", indirect_items, limit=limit))
+    if mismatch_items:
+        lines.extend(_BuildNewsGroupSection("题材错配警示", mismatch_items, limit=limit))
     return lines
 
 
@@ -642,6 +725,7 @@ def _BuildNewsInterpretationSection(
     sector_impact = advice.get("sector_impact", "")
     policy_impact = advice.get("policy_impact", "")
     news_impact = advice.get("news_impact", "")
+    theme_mismatch_note = str(advice.get("theme_mismatch_note", "")).strip()
 
     relevant_items: list[dict[str, Any]] = list(
         news_bundle.get("relevant_items")
@@ -654,11 +738,19 @@ def _BuildNewsInterpretationSection(
     lines: list[str] = []
 
     stats = news_bundle.get("impact_stats", {})
-    bullish = [i for i in relevant_items if i.get("impact") == "涨"]
-    bearish = [i for i in relevant_items if i.get("impact") == "跌"]
+    direct_bullish = [
+        i for i in relevant_items
+        if i.get("impact") == "涨" and str(i.get("directness", "direct")) == "direct"
+    ]
+    direct_bearish = [
+        i for i in relevant_items
+        if i.get("impact") == "跌" and str(i.get("directness", "direct")) == "direct"
+    ]
+    indirect_count = sum(1 for i in relevant_items if str(i.get("directness", "")) == "indirect")
+    mismatch_count = sum(1 for i in relevant_items if str(i.get("directness", "")) == "mismatch")
     neutral = [i for i in relevant_items if i.get("impact") == "中性"]
 
-    if news_summary or sector_impact or policy_impact or news_impact:
+    if news_summary or sector_impact or policy_impact or news_impact or theme_mismatch_note:
         lines.extend([f"**AI 研判{ai_tag}**", ""])
         if news_summary:
             lines.append(f"- {news_summary[:200]}")
@@ -667,6 +759,8 @@ def _BuildNewsInterpretationSection(
             impacts.append(("板块", sector_impact))
         if policy_impact:
             impacts.append(("政策", policy_impact))
+        if theme_mismatch_note:
+            impacts.append(("题材错配", theme_mismatch_note))
         if news_impact:
             impacts.append(("方向", news_impact))
         for label, content in impacts:
@@ -685,15 +779,16 @@ def _BuildNewsInterpretationSection(
             f"政策 **{by_category.get('policy', 0)}**  "
             f"宏观 **{by_category.get('macro', 0)}**",
             f"- **影响** "
-            f'<font color="#E53935">▲{len(bullish)}</font>  '
-            f'<font color="#43A047">▼{len(bearish)}</font>  '
+            f'<font color="#E53935">▲{len(direct_bullish)}</font>  '
+            f'<font color="#43A047">▼{len(direct_bearish)}</font>  '
+            f"背景 **{indirect_count}**  错配 **{mismatch_count}**  "
             f"已过滤无关 **{stats.get('irrelevant', 0)}** 条",
         ])
 
     category_lines = _BuildNewsByCategorySections(relevant_items)
     if category_lines:
         lines.extend(["", *category_lines])
-    elif not bullish and not bearish and not neutral:
+    elif not direct_bullish and not direct_bearish and not neutral:
         lines.extend(["**📰 资讯概览**", "- 今日暂无显著相关资讯", ""])
 
     lines.extend(_BuildKeyImpactHighlights(relevant_items, limit=3))
@@ -709,19 +804,19 @@ def _BuildNewsInterpretationSection(
             parts.append(news_impact_text)
         if parts:
             news_conclusion = " ".join(parts)
-        elif bullish or bearish:
-            if len(bearish) > len(bullish):
+        elif direct_bullish or direct_bearish:
+            if len(direct_bearish) > len(direct_bullish):
                 news_conclusion = (
-                    f"资讯面偏空（利好{len(bullish)}条/利空{len(bearish)}条），"
+                    f"个股直接资讯偏空（利好{len(direct_bullish)}条/利空{len(direct_bearish)}条），"
                     "建议谨慎观望，不宜追涨。"
                 )
-            elif len(bullish) > len(bearish):
+            elif len(direct_bullish) > len(direct_bearish):
                 news_conclusion = (
-                    f"资讯面偏多（利好{len(bullish)}条/利空{len(bearish)}条），"
+                    f"个股直接资讯偏多（利好{len(direct_bullish)}条/利空{len(direct_bearish)}条），"
                     "可适度关注，但仍需结合技术面确认。"
                 )
             else:
-                news_conclusion = "资讯面多空交织，建议以技术面和资金面为主导，资讯作辅助参考。"
+                news_conclusion = "个股直接资讯多空交织，建议以技术面和资金面为主导，资讯作辅助参考。"
         elif neutral:
             news_conclusion = (
                 f"当前 {len(neutral)} 条资讯整体偏中性，"
@@ -1223,7 +1318,499 @@ def BuildDetailSectionsMarkdown(
     return "\n".join(lines)
 
 
+def _ResolveAiConclusion(advice: dict[str, Any]) -> str:
+    """提取 AI 综合结论（优先 news_conclusion，其次近端研判）。"""
+    news_conclusion = str(advice.get("news_conclusion", "")).strip()
+    if news_conclusion:
+        return news_conclusion
+    news_impact = str(advice.get("news_impact", "")).strip()
+    if news_impact:
+        return news_impact
+    predictions = advice.get("predictions") or {}
+    near = predictions.get("near_term") or {}
+    prediction = str(near.get("prediction", "")).strip()
+    if prediction:
+        return prediction
+    return str(advice.get("direction_prediction", "")).strip()
+
+
+def _BuildScoreOneLiner(analysis: dict[str, Any]) -> str:
+    """四维评分一行摘要。"""
+    tech = float(analysis.get("tech_score", 0))
+    fund = float(analysis.get("fund_score", 0))
+    sector = float(analysis.get("sector_score", 0))
+    news = float(analysis.get("news_score", 0))
+    weighted = float(analysis.get("weighted_score", 0))
+    return (
+        f"量化 {_EmScore(weighted, 1)} ｜ "
+        f"技术 {_EmScore(tech)} 资金 {_EmScore(fund)} "
+        f"板块 {_EmScore(sector)} 资讯 {_EmScore(news)}"
+    )
+
+
+def _BuildCompactHeaderSection(
+    price: float,
+    change_pct: float,
+    change_amt: float,
+    session_label: str,
+    header_direction: str,
+    header_icon: str,
+    buy_action: str,
+    sell_action: str,
+    add_tier1: dict[str, Any],
+    analysis: dict[str, Any],
+    advice: dict[str, Any],
+    horizon: dict[str, Any] | None = None,
+) -> list[str]:
+    """构建精简版结论速览。"""
+    lines: list[str] = [
+        f"# 📊 {config.STOCK_NAME}",
+        f"## {config.STOCK_CODE} 分析报告",
+        "",
+        f"**{session_label}** ｜ {NowStr()}",
+        "",
+        f"**现价** {_BoldPrice(price, 'up' if change_pct >= 0 else 'down')}  "
+        f"{_FormatChangeDisplay(change_pct, change_amt)}",
+        "",
+        f"**方向** {_DirectionBadge(header_direction, header_icon)}",
+    ]
+    if horizon:
+        target = str(horizon.get("near_term_target", "")).strip()
+        if target:
+            lines.extend(["", f"**预测对象** {target}"])
+    lines.extend([
+        "",
+        f"**买卖建议** 买 {_EmAction(buy_action)} ｜ 卖 {_EmAction(sell_action)}",
+    ])
+    if add_tier1.get("low") and add_tier1.get("high"):
+        rec1 = ResolveTierRecommended(add_tier1, "buy")
+        if rec1 > 0:
+            src = "AI" if add_tier1.get("recommended_source") == "ai" else "技术锚点"
+            lines.extend(["", f"**优先加仓价** {_BoldPrice(rec1, 'up')}（{src}）"])
+        else:
+            lines.extend([
+                "",
+                f"**优先加仓区** {_BoldPriceRange(float(add_tier1['low']), float(add_tier1['high']))}",
+            ])
+    lines.extend(["", f"**四维评分** {_BuildScoreOneLiner(analysis)}"])
+    ai_conclusion = _ResolveAiConclusion(advice)
+    if ai_conclusion:
+        lines.extend(["", f"**综合结论** {_TruncateText(ai_conclusion, 150)}"])
+    lines.append("")
+    return lines
+
+
+def _BuildCompactNewsSection(
+    advice: dict[str, Any],
+    ai_tag: str,
+) -> list[str]:
+    """构建精简版资讯研判（单一资讯块，无逐条分类长列表）。"""
+    news_summary = str(advice.get("news_summary", "")).strip()
+    sector_impact = str(advice.get("sector_impact", "")).strip()
+    policy_impact = str(advice.get("policy_impact", "")).strip()
+    news_impact = str(advice.get("news_impact", "")).strip()
+    news_conclusion = str(advice.get("news_conclusion", "")).strip()
+    theme_mismatch_note = str(advice.get("theme_mismatch_note", "")).strip()
+
+    news_bundle = advice.get("news_bundle") or {}
+    relevant_items: list[dict[str, Any]] = list(
+        news_bundle.get("relevant_items")
+        or news_bundle.get("scored_items", [])
+    )
+    stats = news_bundle.get("impact_stats", {})
+    by_cat = stats.get("by_category", {})
+
+    direct_bullish = [
+        i for i in relevant_items
+        if i.get("impact") == "涨" and str(i.get("directness", "direct")) == "direct"
+    ]
+    direct_bearish = [
+        i for i in relevant_items
+        if i.get("impact") == "跌" and str(i.get("directness", "direct")) == "direct"
+    ]
+    indirect_items = [i for i in relevant_items if str(i.get("directness", "")) == "indirect"]
+    mismatch_items = [i for i in relevant_items if str(i.get("directness", "")) == "mismatch"]
+
+    has_content = bool(
+        news_summary or sector_impact or policy_impact or theme_mismatch_note
+        or news_impact or news_conclusion
+        or direct_bullish or direct_bearish or indirect_items or mismatch_items
+    )
+    if not has_content:
+        return []
+
+    lines: list[str] = [""]
+    if stats:
+        lines.append(
+            f"- 采集 **{stats.get('total', 0)}** 条"
+            f"（个股{by_cat.get('stock', 0)} 板块{by_cat.get('sector', 0)} "
+            f"政策{by_cat.get('policy', 0)}）"
+        )
+    if news_summary:
+        lines.append(f"- {_TruncateText(news_summary, 150)}")
+    if policy_impact:
+        lines.append(f"- **政策** {_TruncateText(policy_impact, 120)}")
+    if sector_impact:
+        lines.append(f"- **板块** {_TruncateText(sector_impact, 80)}")
+    if theme_mismatch_note:
+        lines.append(f"- **题材错配** {_TruncateText(theme_mismatch_note, 80)}")
+    conclusion = news_conclusion or news_impact
+    if conclusion:
+        lines.append(f"- **方向** {_TruncateText(conclusion, 100)}")
+
+    for item in direct_bullish[:1]:
+        reason = str(item.get("impact_reason") or item.get("title", "")).strip()
+        if reason:
+            lines.append(f"- **个股直接利好** {_TruncateText(reason, 80)}")
+    for item in direct_bearish[:1]:
+        reason = str(item.get("impact_reason") or item.get("title", "")).strip()
+        if reason:
+            lines.append(f"- **个股直接利空** {_TruncateText(reason, 80)}")
+    for item in indirect_items[:2]:
+        reason = str(item.get("impact_reason") or item.get("title", "")).strip()
+        if reason:
+            lines.append(f"- **板块背景** {_TruncateText(reason, 80)}")
+    for item in mismatch_items[:2]:
+        reason = str(item.get("impact_reason") or item.get("title", "")).strip()
+        if reason:
+            lines.append(f"- **题材错配警示** {_TruncateText(reason, 80)}")
+    lines.append("")
+    return lines
+
+
+def _BuildMarketSignalsSection(
+    data: dict[str, Any],
+    analysis: dict[str, Any],
+    *,
+    is_trading_day: bool = True,
+) -> list[str]:
+    """合并行情精简、技术、资金、板块 TOP5 为盘面信号。"""
+    rt = data.get("realtime") or {}
+    lines: list[str] = [""]
+    if rt:
+        if not is_trading_day:
+            lines.append("- **说明** 休市中，行情为上一交易日收盘参考")
+        lines.extend([
+            f"- **开/高/低** {_BoldPrice(float(rt.get('open', 0)))} / "
+            f"{_BoldPrice(float(rt.get('high', 0)), 'up')} / "
+            f"{_BoldPrice(float(rt.get('low', 0)), 'down')}",
+            f"- **量/额** **{FormatVolume(rt.get('volume', 0))}** / "
+            f"**{FormatAmount(rt.get('amount', 0))}**  "
+            f"换手 **{float(rt.get('turnover', 0)):.2f}%**  "
+            f"量比 **{float(rt.get('volume_ratio', 0)):.2f}**",
+        ])
+
+    tech_signals = list(analysis.get("tech_signals") or [])[:4]
+    if tech_signals:
+        lines.extend(["", "**技术**"])
+        lines.extend(_BuildPlainBulletItems(tech_signals))
+
+    fund_signals = list(analysis.get("fund_signals") or [])[:3]
+    if fund_signals:
+        lines.extend(["", "**资金**"])
+        lines.extend(_BuildPlainBulletItems(fund_signals))
+
+    concept = data.get("concept")
+    if concept is not None and not getattr(concept, "empty", True):
+        sector_signals = analysis.get("sector_signals", [])
+        for sig in sector_signals:
+            if "概念板块" in str(sig):
+                lines.extend(["", f"**{sig}**"])
+                break
+        lines.append("")
+        lines.append("**概念 TOP5**")
+        for i in range(min(5, len(concept))):
+            row = concept.iloc[i]
+            name = str(row.get("板块名称", ""))
+            pct = float(row.get("涨跌幅", 0))
+            if pct >= 0:
+                pct_text = f'<font color="#E53935">+{pct:.2f}%</font>'
+            else:
+                pct_text = f'<font color="#43A047">{pct:.2f}%</font>'
+            lines.append(f"- **{i + 1}.** {name}  {pct_text}")
+    elif not rt:
+        lines.append("- 盘面数据暂不可用")
+
+    lines.append("")
+    return lines
+
+
+def _BuildCompactPriceMoveSection(
+    price_move: dict[str, Any] | None,
+    ai_tag: str,
+) -> list[str]:
+    """构建精简版涨跌归因（摘要 + 每维最多 1 条要点）。"""
+    if not price_move:
+        return []
+
+    direction = str(price_move.get("move_direction", "平"))
+    headline = str(price_move.get("headline", "")).strip()
+    primary = str(price_move.get("primary_driver", "")).strip()
+    brief = bool(price_move.get("brief"))
+    source_tag = ai_tag if price_move.get("source") == "llm" else ""
+
+    driver_labels = {
+        "policy": "政策/资讯",
+        "sector": "板块",
+        "technical": "技术",
+        "sentiment": "情绪/资金",
+        "mixed": "综合",
+    }
+    driver_text = driver_labels.get(primary, primary)
+
+    lines: list[str] = [
+        "",
+        f"- **归因摘要{source_tag}** {_EmAction(headline) if headline else '—'}",
+    ]
+    if primary:
+        lines.append(f"- **主因** {driver_text}")
+
+    if brief:
+        gaps = price_move.get("evidence_gaps") or []
+        if gaps:
+            lines.append(f"- **证据缺口** {'；'.join(str(g) for g in gaps[:2])}")
+        lines.append("")
+        return lines
+
+    dimensions = price_move.get("dimensions") or []
+    for dim in dimensions:
+        if not isinstance(dim, dict):
+            continue
+        points = dim.get("points") or []
+        if not points:
+            continue
+        pt = points[0]
+        if not isinstance(pt, dict):
+            continue
+        dim_title = str(dim.get("title", "")).strip()
+        subtitle = str(pt.get("subtitle", "")).strip()
+        content = str(pt.get("content", "")).strip()
+        if not content:
+            continue
+        bullet = f"- **{dim_title}** "
+        if subtitle:
+            bullet += f"{subtitle}："
+        bullet += content
+        if dim.get("id") == "risks" and direction == "涨":
+            bullet = f'<font color="#E53935">{bullet}</font>'
+        lines.append(_HighlightMetricsInText(bullet))
+
+    gaps = price_move.get("evidence_gaps") or []
+    if gaps:
+        lines.append(f"- **证据缺口** {'；'.join(str(g) for g in gaps[:2])}")
+    lines.append("")
+    return lines
+
+
+def _BuildCompactTradeAdviceSection(
+    advice: dict[str, Any],
+    ai_tag: str,
+    buy_icon: str,
+    sell_icon: str,
+) -> list[str]:
+    """构建精简版买卖建议（去掉与速览/预测重复的依据与操作策略）。"""
+    levels = ResolveTradeDisplayLevels(advice)
+    plan = advice.get("trade_plan") or {}
+    zones = plan if plan.get("add_tier1") else (advice.get("trade_zones") or {})
+    at1 = zones.get("add_tier1", {})
+    at2 = zones.get("add_tier2", {})
+    st1 = zones.get("sell_tier1", {})
+    st2 = zones.get("sell_tier2", {})
+    buy_action = str(advice.get("buy_action", "观望")).strip() or "观望"
+    sell_action = str(advice.get("sell_action", "持有")).strip() or "持有"
+
+    lines: list[str] = []
+    risk = str(plan.get("risk_warning", "")).strip()
+    if risk:
+        lines.extend(["", f"- **风险提示** {risk}"])
+
+    lines.extend([
+        "",
+        f"**{buy_icon} 买入建议**",
+        f"- **动作** {_EmAction(buy_action)}",
+    ])
+    lines.extend(_FormatTierBlock("第一加仓（优先等待）", at1, show_stop=True))
+    lines.extend(_FormatTierBlock("第二加仓（次选）", at2, show_stop=False))
+    lines.extend(_FormatNoAddZones(plan.get("no_add_zones", [])))
+
+    lines.extend([
+        "",
+        f"**{sell_icon} 卖出建议（做T降本）**",
+        f"- **动作** {_EmAction(sell_action)}",
+    ])
+    lines.extend(_FormatTierBlock("第一卖出（先减）", st1, side="sell"))
+    lines.extend(_FormatTierBlock("第二卖出（再减）", st2, side="sell"))
+
+    discipline = plan.get("discipline") or []
+    if discipline:
+        lines.extend(["", "**加仓纪律**"])
+        for i, d in enumerate(discipline, 1):
+            lines.append(f"- **{i}.** {_HighlightMetricsInText(str(d))}")
+
+    bd = plan.get("breakdown_plan") or {}
+    if bd.get("level", 0) > 0:
+        next_sup = bd.get("next_support", 0)
+        next_text = (
+            f"（下一档 {_BoldPrice(float(next_sup))}）" if next_sup > 0 else ""
+        )
+        lines.extend([
+            "",
+            f"- **跌破应对** 有效跌破 {_BoldPrice(float(bd.get('level', 0)), 'down')}："
+            f"{bd.get('action', '')}{next_text}",
+        ])
+
+    pricing_note = _BuildPricingNote(advice)
+    lines.extend(["", f"- **定价说明** {pricing_note}"])
+    if levels["kline_differs"]:
+        lines.append(
+            f"- **K线均线参考** S1={_BoldPrice(levels['rule_s1'])} "
+            f"S2={_BoldPrice(levels['rule_s2'])} ｜ "
+            f"R1={_BoldPrice(levels['rule_r1'], 'up')} "
+            f"R2={_BoldPrice(levels['rule_r2'], 'up')}"
+        )
+    lines.append("")
+    return lines
+
+
+def BuildCompactDingTalkReportMarkdown(
+    data: dict[str, Any],
+    analysis: dict[str, Any],
+    advice: dict[str, Any],
+    session_label: str = "盘中",
+    report_mode: str = "daily",
+) -> str:
+    """构建精简版钉钉报告（分析结论优先，去除章节重复）。"""
+    mode = advice.get("report_mode", report_mode)
+    rt = data.get("realtime") or {}
+    price = float(rt.get("price", analysis.get("indicators", {}).get("price", 0)) or 0.0)
+    change_pct = float(rt.get("change_pct", 0) or 0)
+    change_amt = float(rt.get("change_amt", 0) or 0)
+
+    direction = analysis.get("direction", "震荡")
+    buy_icon = "🟢" if advice.get("buy_ok") else "🟡"
+    sell_icon = "🔴" if advice.get("sell_ok") else "🟡"
+    ai_tag = "（AI）" if advice.get("llm_used") else ""
+    sec = [1]
+
+    predictions_hdr = advice.get("predictions") or {}
+    near_hdr = predictions_hdr.get("near_term") or {}
+    header_direction = str(near_hdr.get("direction") or direction)
+    header_icon = _GetDirectionIcon(header_direction)
+    plan_hdr = advice.get("trade_plan") or {}
+    at1_hdr = (
+        plan_hdr.get("add_tier1")
+        or advice.get("trade_zones", {}).get("add_tier1")
+        or {}
+    )
+    horizon_hdr = advice.get("prediction_horizon") or {}
+    is_trading_day = bool(horizon_hdr.get("is_trading_day", True))
+
+    lines: list[str] = _BuildCompactHeaderSection(
+        price,
+        change_pct,
+        change_amt,
+        session_label,
+        header_direction,
+        header_icon,
+        str(advice.get("buy_action", "观望")),
+        str(advice.get("sell_action", "持有")),
+        at1_hdr,
+        analysis,
+        advice,
+        horizon=horizon_hdr,
+    )
+
+    lines.extend([
+        _SectionDivider(),
+        "",
+        _NextSection(sec, f"分层预测{ai_tag}"),
+        "",
+    ])
+    lines.extend(_BuildComprehensivePredictionSection(
+        analysis,
+        advice,
+        ai_tag,
+        include_news=False,
+        include_scores=False,
+        include_near_target=False,
+    ))
+
+    news_section = _BuildCompactNewsSection(advice, ai_tag)
+    if news_section:
+        lines.extend([
+            _SectionDivider(),
+            "",
+            _NextSection(sec, f"资讯研判{ai_tag}"),
+        ])
+        lines.extend(news_section)
+
+    lines.extend([
+        _SectionDivider(),
+        "",
+        _NextSection(sec, f"买卖建议{ai_tag}"),
+    ])
+    lines.extend(_BuildCompactTradeAdviceSection(advice, ai_tag, buy_icon, sell_icon))
+
+    lines.extend([
+        "",
+        _SectionDivider(),
+        "",
+        _NextSection(sec, "盘面信号"),
+    ])
+    lines.extend(_BuildMarketSignalsSection(
+        data, analysis, is_trading_day=is_trading_day,
+    ))
+
+    price_move = advice.get("price_move")
+    if price_move:
+        move_pct_hdr = float(price_move.get("move_pct", change_pct) or change_pct)
+        lines.extend([
+            "",
+            _SectionDivider(),
+            "",
+            _NextSection(sec, f"涨跌归因（{FormatPercent(move_pct_hdr)}）"),
+        ])
+        lines.extend(_BuildCompactPriceMoveSection(price_move, ai_tag))
+
+    portfolio = advice.get("portfolio")
+    if portfolio and mode != "daily":
+        lines.extend([
+            "",
+            _SectionDivider(),
+            "",
+            _NextSection(sec, "持仓与回本"),
+            f"- 总持仓：**{portfolio.get('total_shares', 0)} 股**",
+            f"- 加权成本：**{FormatPrice(portfolio.get('weighted_cost', 0))}**",
+            f"- 回本目标价：**{FormatPrice(portfolio.get('breakeven_price', 0))}**"
+            f"（需涨 {portfolio.get('distance_to_breakeven_pct', 0):+.1f}%）",
+        ])
+
+    lines.extend([
+        "",
+        _SectionDivider(),
+        "> ⚠️ 以上分析由程序自动生成，仅供参考，不构成投资建议。股市有风险，投资需谨慎。",
+    ])
+    return "\n".join(lines)
+
+
 def BuildDingTalkReportMarkdown(
+    data: dict[str, Any],
+    analysis: dict[str, Any],
+    advice: dict[str, Any],
+    session_label: str = "盘中",
+    report_mode: str = "daily",
+) -> str:
+    """构建钉钉分析报告 Markdown（compact 默认，full 为完整长报告）。"""
+    if config.DINGTALK_REPORT_MODE == "full":
+        return _BuildFullDingTalkReportMarkdown(
+            data, analysis, advice, session_label, report_mode,
+        )
+    return BuildCompactDingTalkReportMarkdown(
+        data, analysis, advice, session_label, report_mode,
+    )
+
+
+def _BuildFullDingTalkReportMarkdown(
     data: dict[str, Any],
     analysis: dict[str, Any],
     advice: dict[str, Any],

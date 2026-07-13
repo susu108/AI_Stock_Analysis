@@ -8,6 +8,8 @@ from typing import Any
 import pandas as pd
 
 import config
+from news_analyzer import GetBackgroundNewsItems, GetImpactfulItems
+from news_context import ComputeSectorThemeOverlap, ComputeStockVsSectorDivergence
 from price_context import CalcPriceAnchors, ExtractRecentPriceLevels
 from utils import FormatAmount, SafeFloat, SetupLogger
 
@@ -109,6 +111,7 @@ def FormatNewsForContext(items: list[dict[str, Any]], limit: int = 8) -> list[di
             "title": str(item.get("title", "")),
             "content": str(item.get("content", ""))[:300],
             "impact": str(item.get("impact", "")),
+            "directness": str(item.get("directness", "")),
             "impact_reason": str(item.get("impact_reason", "")),
             "source": str(item.get("source", "")),
             "url": str(item.get("url", "")),
@@ -146,10 +149,11 @@ def BuildMoveContext(
 
     relevant = list(bundle.get("relevant_items") or [])
     web_hits = list(bundle.get("web_search") or [])
-    impactful = [
-        i for i in relevant
-        if str(i.get("impact", "")) in ("涨", "跌")
-    ]
+    impactful = GetImpactfulItems(relevant)
+    background = GetBackgroundNewsItems(relevant)
+
+    overlap = ComputeSectorThemeOverlap(data)
+    divergence = ComputeStockVsSectorDivergence(data)
 
     move_direction = "平"
     if change_pct > 0.3:
@@ -161,6 +165,9 @@ def BuildMoveContext(
         "stock_name": config.STOCK_NAME,
         "stock_code": config.STOCK_CODE,
         "stock_themes": list(config.STOCK_THEMES),
+        "stock_business": config.STOCK_BUSINESS,
+        "sector_theme_overlap": overlap,
+        "stock_vs_sector_divergence": divergence,
         "move_date": date.today().isoformat(),
         "move_direction": move_direction,
         "change_pct": change_pct,
@@ -195,6 +202,7 @@ def BuildMoveContext(
         "news_signals": list(analysis.get("news_signals") or []),
         "relevant_news": FormatNewsForContext(relevant),
         "impactful_news": FormatNewsForContext(impactful, limit=6),
+        "background_news": FormatNewsForContext(background, limit=6),
         "web_search_hits": FormatNewsForContext(web_hits, limit=6),
         "news_score": SafeFloat(analysis.get("news_score")),
         "weighted_score": SafeFloat(analysis.get("weighted_score")),
