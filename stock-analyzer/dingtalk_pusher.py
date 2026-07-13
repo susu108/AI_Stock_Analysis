@@ -430,14 +430,21 @@ def _BuildNewsBriefSection(
         if reason:
             lines.append(f"- **个股直接利空** {_TruncateText(reason, 80)}")
     if indirect_items:
-        item = indirect_items[0]
-        reason = str(item.get("impact_reason") or item.get("title", "")).strip()
-        if reason:
+        covered: list[str] = [
+            news_summary, policy_impact, sector_impact, theme_mismatch_note,
+            news_impact, news_conclusion,
+        ]
+        item = _SelectUniqueNewsHighlights(indirect_items, 1, covered)
+        if item:
+            reason = _ItemDisplayReason(item[0])
             lines.append(f"- **板块背景** {_TruncateText(reason, 80)}")
     if mismatch_items:
-        item = mismatch_items[0]
-        reason = str(item.get("impact_reason") or item.get("title", "")).strip()
-        if reason:
+        covered_m: list[str] = [
+            news_summary, policy_impact, sector_impact, theme_mismatch_note,
+            news_impact, news_conclusion,
+        ]
+        for item in _SelectUniqueNewsHighlights(mismatch_items, 1, covered_m):
+            reason = _ItemDisplayReason(item)
             lines.append(f"- **题材错配警示** {_TruncateText(reason, 80)}")
     if move_headline:
         label = "上日涨跌" if not is_trading_day else "涨跌主因"
@@ -547,6 +554,53 @@ def _DedupeNewsItems(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         seen.add(key)
         result.append(item)
+    return result
+
+
+def _ItemDisplayReason(item: dict[str, Any]) -> str:
+    """提取资讯展示用说明文案。"""
+    return str(item.get("impact_reason") or item.get("title", "")).strip()
+
+
+def _IsReasonCovered(reason: str, covered_texts: list[str]) -> bool:
+    """判断说明是否已被其他字段覆盖（避免重复展示）。"""
+    reason_key = _NormalizeTitleKey(reason)
+    if not reason_key:
+        return True
+    for text in covered_texts:
+        if not text:
+            continue
+        if _NormalizeTitleKey(text) == reason_key:
+            return True
+        if reason in text or text in reason:
+            return True
+    return False
+
+
+def _SelectUniqueNewsHighlights(
+    items: list[dict[str, Any]],
+    limit: int,
+    covered_texts: list[str],
+) -> list[dict[str, Any]]:
+    """按 impact_reason 去重并跳过已覆盖文案，保留 strength 最高条目。"""
+    sorted_items = sorted(
+        items,
+        key=lambda x: (-int(x.get("strength", 0) or 0), str(x.get("time", ""))),
+    )
+    seen_reasons: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for item in sorted_items:
+        reason = _ItemDisplayReason(item)
+        reason_key = _NormalizeTitleKey(reason)
+        if not reason_key or reason_key in seen_reasons:
+            continue
+        if _IsReasonCovered(reason, covered_texts):
+            continue
+        seen_reasons.add(reason_key)
+        result.append(item)
+        covered_texts.append(reason)
+        if len(result) >= limit:
+            break
     return result
 
 
@@ -1458,22 +1512,27 @@ def _BuildCompactNewsSection(
     if conclusion:
         lines.append(f"- **方向** {_TruncateText(conclusion, 100)}")
 
+    covered_texts: list[str] = [
+        news_summary, policy_impact, sector_impact, theme_mismatch_note,
+        news_conclusion, news_impact,
+    ]
+
     for item in direct_bullish[:1]:
-        reason = str(item.get("impact_reason") or item.get("title", "")).strip()
-        if reason:
+        reason = _ItemDisplayReason(item)
+        if reason and not _IsReasonCovered(reason, covered_texts):
             lines.append(f"- **个股直接利好** {_TruncateText(reason, 80)}")
+            covered_texts.append(reason)
     for item in direct_bearish[:1]:
-        reason = str(item.get("impact_reason") or item.get("title", "")).strip()
-        if reason:
+        reason = _ItemDisplayReason(item)
+        if reason and not _IsReasonCovered(reason, covered_texts):
             lines.append(f"- **个股直接利空** {_TruncateText(reason, 80)}")
-    for item in indirect_items[:2]:
-        reason = str(item.get("impact_reason") or item.get("title", "")).strip()
-        if reason:
-            lines.append(f"- **板块背景** {_TruncateText(reason, 80)}")
-    for item in mismatch_items[:2]:
-        reason = str(item.get("impact_reason") or item.get("title", "")).strip()
-        if reason:
-            lines.append(f"- **题材错配警示** {_TruncateText(reason, 80)}")
+            covered_texts.append(reason)
+    for item in _SelectUniqueNewsHighlights(indirect_items, 2, covered_texts):
+        reason = _ItemDisplayReason(item)
+        lines.append(f"- **板块背景** {_TruncateText(reason, 80)}")
+    for item in _SelectUniqueNewsHighlights(mismatch_items, 2, covered_texts):
+        reason = _ItemDisplayReason(item)
+        lines.append(f"- **题材错配警示** {_TruncateText(reason, 80)}")
     lines.append("")
     return lines
 

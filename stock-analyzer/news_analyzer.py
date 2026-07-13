@@ -403,9 +403,21 @@ def CalcNewsScore(
                 signals.append(f"题材错配：{short_title}")
 
     scored_items.sort(key=lambda x: abs(x[0]), reverse=True)
-    signals = [s for _, s in scored_items[:6]] + [
+    merged_signals = [s for _, s in scored_items[:6]] + [
         s for s in signals if s not in [x[1] for x in scored_items]
-    ][:6]
+    ]
+    seen_keys: set[str] = set()
+    deduped_signals: list[str] = []
+    for signal in merged_signals:
+        body = signal.split("：", 1)[-1].strip() if "：" in signal else signal.strip()
+        key = body[:32]
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped_signals.append(signal)
+        if len(deduped_signals) >= 6:
+            break
+    signals = deduped_signals
 
     score = max(-100.0, min(100.0, score))
     return score, signals[:6]
