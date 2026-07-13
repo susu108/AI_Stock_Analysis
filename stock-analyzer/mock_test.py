@@ -3,23 +3,22 @@
 from __future__ import annotations
 
 import config
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from advisor import GenerateAdvice
-from analyzer import AnalyzeAll, MergeNewsIntoAnalysis
+from analyzer import AnalyzeAll, ComputeIndicators, MergeNewsIntoAnalysis
+from data_fetcher import MergeRealtimeIntoKline
 from dingtalk_pusher import (
     BuildDingTalkReportMarkdown,
-    BuildPortfolioReportMarkdown,
     BuildReportMarkdown,
     ResolveTradeDisplayLevels,
 )
 from market_context import ResolvePredictionHorizon, ResolveSessionAndHorizon
 from news_analyzer import AnalyzeNewsImpact, CalcNewsScore
-from portfolio_advisor import GeneratePortfolioAdvice
 
 
 def BuildMockKline(days: int = 60) -> pd.DataFrame:
@@ -327,6 +326,46 @@ def RunHorizonResolverTests(
     return sat_ok, fri_ok, sat_dingtalk_ok
 
 
+def RunKlineMergeTest() -> bool:
+    """验证盘中实时价融合进 K 线后，技术指标现价与 spot 一致。"""
+    kline = BuildMockKline(20)
+    kline = kline[kline["日期"] <= "2026-07-10"].copy()
+    if kline.empty:
+        return False
+
+    realtime: dict[str, Any] = {
+        "price": 65.50,
+        "prev_close": 61.67,
+        "open": 62.00,
+        "high": 66.00,
+        "low": 61.50,
+        "volume": 3000000.0,
+        "amount": 190000000.0,
+        "turnover": 5.0,
+    }
+    session_time = datetime(2026, 7, 13, 10, 0)
+    merged = MergeRealtimeIntoKline(kline, realtime, check_time=session_time)
+    if merged is None or merged.empty:
+        return False
+    last_row = merged.iloc[-1]
+    if str(last_row["日期"])[:10] != "2026-07-13":
+        return False
+    indicators = ComputeIndicators(merged)
+    return abs(float(indicators["price"]) - 65.50) < 0.01
+
+
+def RunTailHorizonTest() -> bool:
+    """验证 14:30 尾盘标签的 horizon 为今日预测。"""
+    horizon = ResolvePredictionHorizon("尾盘")
+    _, session_horizon = ResolveSessionAndHorizon("尾盘", check_date=date(2026, 7, 13))
+    return (
+        horizon.get("is_market_open") is True
+        and horizon.get("near_term_horizon") == "today"
+        and session_horizon.get("is_market_open") is True
+        and "今日" in str(session_horizon.get("near_term_target", ""))
+    )
+
+
 def RunMockTest() -> None:
     """运行模拟测试，打印完整 Markdown 报告。"""
     print("=" * 60)
@@ -483,6 +522,11 @@ def RunMockTest() -> None:
     print(f"周末Horizon解析: {'通过' if sat_ok else '失败'}")
     print(f"周五Horizon解析: {'通过' if fri_ok else '失败'}")
     print(f"周末钉钉资讯融合: {'通过' if sat_dingtalk_ok else '失败'}")
+
+    kline_merge_ok = RunKlineMergeTest()
+    tail_horizon_ok = RunTailHorizonTest()
+    print(f"盘中K线融合: {'通过' if kline_merge_ok else '失败'}")
+    print(f"尾盘Horizon: {'通过' if tail_horizon_ok else '失败'}")
     news_brief_ok = "资讯综合" in report and "GLP-1产业链受益" in report
     news_idx = report.find("资讯综合")
     score_idx = report.find("四维评分")
@@ -514,13 +558,13 @@ def RunMockTest() -> None:
         or not trade_format_ok or not levels_ok or not layered_ok
         or not pre_ok or not intraday_ok or not full_modules_ok
         or not sat_ok or not fri_ok or not sat_dingtalk_ok or not news_brief_ok
-        or not news_brief_pos_ok
+        or not news_brief_pos_ok or not kline_merge_ok or not tail_horizon_ok
     ):
         raise SystemExit(1)
 
-    portfolio_advice = GeneratePortfolioAdvice(data, analysis)
-    print("\n--- 持仓专报预览 ---")
-    print(BuildPortfolioReportMarkdown(portfolio_advice))
+    # portfolio_advice = GeneratePortfolioAdvice(data, analysis)
+    # print("\n--- 持仓专报预览 ---")
+    # print(BuildPortfolioReportMarkdown(portfolio_advice))
     print("=" * 60)
     print("模拟测试完成")
 

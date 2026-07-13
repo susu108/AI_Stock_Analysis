@@ -71,8 +71,10 @@ def GetSessionLabel(push_time: str | None = None) -> str:
         return "上午盘中"
     if minutes < 13 * 60:
         return "午盘"
-    if minutes < 15 * 60:
+    if minutes < 14 * 60:
         return "下午盘中"
+    if minutes < 15 * 60:
+        return "尾盘"
     return "收盘后"
 
 
@@ -213,9 +215,12 @@ def Main() -> None:
     args = ParseArgs()
 
     if args.portfolio:
-        logger.info("股票分析工具 — %s(%s) 模式:持仓建议", config.STOCK_NAME, config.STOCK_CODE)
-        JobPortfolio(force_run=True)
+        logger.warning("持仓专报推送已暂停，请使用日常报告")
         return
+    # if args.portfolio:
+    #     logger.info("股票分析工具 — %s(%s) 模式:持仓建议", config.STOCK_NAME, config.STOCK_CODE)
+    #     JobPortfolio(force_run=True)
+    #     return
 
     if args.scheduled:
         label = GetSessionLabel(args.push_time)

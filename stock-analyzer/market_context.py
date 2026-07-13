@@ -62,6 +62,15 @@ def ResolvePredictionHorizon(session_label: str) -> dict[str, Any]:
             "near_term_target": "今日下午盘",
         }
 
+    if label == "尾盘":
+        return {
+            "session_label": label,
+            "is_market_open": True,
+            "near_term_label": "今日预测",
+            "near_term_horizon": "today",
+            "near_term_target": "今日剩余时段至收盘",
+        }
+
     return {
         "session_label": label,
         "is_market_open": False,

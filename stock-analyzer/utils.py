@@ -83,6 +83,17 @@ def IsTradingDay(check_date: date | None = None) -> bool:
     return True
 
 
+def IsMarketSessionOpen(check_time: datetime | None = None) -> bool:
+    """判断当前是否处于 A 股连续竞价时段（09:30–11:30、13:00–15:00）。"""
+    now = check_time or datetime.now()
+    if not IsTradingDay(now.date()):
+        return False
+    minutes = now.hour * 60 + now.minute
+    morning = 9 * 60 + 30 <= minutes < 11 * 60 + 30
+    afternoon = 13 * 60 <= minutes < 15 * 60
+    return morning or afternoon
+
+
 def SetupLogger(level: str = "INFO") -> logging.Logger:
     """配置并返回项目根 logger。"""
     logger = logging.getLogger("stock_analyzer")

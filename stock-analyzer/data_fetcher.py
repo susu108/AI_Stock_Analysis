@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from io import StringIO
 from typing import Any, Callable, TypeVar
 
@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup
 from py_mini_racer import MiniRacer
 
 import config
-from utils import SafeFloat, SetupLogger
+from utils import IsMarketSessionOpen, IsTradingDay, SafeFloat, SetupLogger
 
 logger = SetupLogger(config.LOG_LEVEL)
 
@@ -315,6 +315,154 @@ def _EnrichRealtimeQuote(
     return realtime
 
 
+def _KlineDateStr(row_date: Any) -> str:
+    """将 K 线日期列统一为 YYYY-MM-DD 字符串。"""
+    if hasattr(row_date, "strftime"):
+        return row_date.strftime("%Y-%m-%d")
+    text = str(row_date).strip()[:10]
+    return text.replace("/", "-")
+
+
+def MergeRealtimeIntoKline(
+    kline: pd.DataFrame | None,
+    realtime: dict[str, Any] | None,
+    check_time: datetime | None = None,
+) -> pd.DataFrame | None:
+    """盘中将实时价融合进日 K，保证技术指标与现价一致。"""
+    if kline is None or kline.empty or realtime is None:
+        return kline
+    if not IsMarketSessionOpen(check_time):
+        return kline
+
+    price = SafeFloat(realtime.get("price"))
+    if price <= 0:
+        return kline
+
+    today_str = (check_time or datetime.now()).date().strftime("%Y-%m-%d")
+    prev_close = SafeFloat(realtime.get("prev_close"))
+    open_price = SafeFloat(realtime.get("open")) or price
+    high = max(SafeFloat(realtime.get("high")), price, open_price)
+    low_raw = SafeFloat(realtime.get("low"))
+    low = min(low_raw, price, open_price) if low_raw > 0 else min(price, open_price)
+    volume = SafeFloat(realtime.get("volume"))
+    amount = SafeFloat(realtime.get("amount"))
+    change_amt = round(price - prev_close, 2) if prev_close else 0.0
+    change_pct = round(change_amt / prev_close * 100, 2) if prev_close else 0.0
+    amplitude = round((high - low) / prev_close * 100, 2) if prev_close else 0.0
+
+    result = kline.copy()
+    last_date = _KlineDateStr(result.iloc[-1]["日期"])
+
+    row_data: dict[str, Any] = {
+        "日期": today_str,
+        "开盘": open_price,
+        "收盘": price,
+        "最高": high,
+        "最低": low,
+        "成交量": volume,
+        "成交额": amount,
+        "涨跌幅": change_pct,
+        "涨跌额": change_amt,
+        "振幅": amplitude,
+    }
+    if "换手率" in result.columns:
+        turnover = SafeFloat(realtime.get("turnover"))
+        row_data["换手率"] = round(turnover / 100, 4) if turnover > 1 else turnover
+
+    if last_date == today_str:
+        for key, value in row_data.items():
+            if key in result.columns:
+                result.at[result.index[-1], key] = value
+        logger.info("K线已融合今日实时价: %.2f（更新）", price)
+    elif last_date < today_str:
+        result = pd.concat([result, pd.DataFrame([row_data])], ignore_index=True)
+        logger.info("K线已融合今日实时价: %.2f（追加）", price)
+    else:
+        logger.debug("K线末行日期 %s 晚于今日，跳过融合", last_date)
+
+    return result
+
+
+def _FetchEastmoneyRealtime() -> dict[str, Any] | None:
+    """东方财富全市场 spot 中提取单股实时行情。"""
+    try:
+        df = ak.stock_zh_a_spot_em()
+        row = df[df["代码"] == config.STOCK_CODE]
+        if row.empty:
+            return None
+        r = row.iloc[0]
+        return {
+            "code": str(r["代码"]),
+            "name": str(r["名称"]),
+            "price": SafeFloat(r["最新价"]),
+            "change_pct": SafeFloat(r["涨跌幅"]),
+            "change_amt": SafeFloat(r["涨跌额"]),
+            "open": SafeFloat(r["今开"]),
+            "high": SafeFloat(r["最高"]),
+            "low": SafeFloat(r["最低"]),
+            "prev_close": SafeFloat(r["昨收"]),
+            "volume": SafeFloat(r["成交量"]),
+            "amount": SafeFloat(r["成交额"]),
+            "turnover": SafeFloat(r["换手率"]),
+            "volume_ratio": SafeFloat(r["量比"]),
+            "pe": SafeFloat(r.get("市盈率-动态", 0)),
+            "pb": SafeFloat(r.get("市净率", 0)),
+            "amplitude": SafeFloat(r.get("振幅", 0)),
+            "total_mv": SafeFloat(r.get("总市值", 0)),
+            "circ_mv": SafeFloat(r.get("流通市值", 0)),
+            "source": "eastmoney",
+        }
+    except Exception as exc:
+        logger.warning("东方财富实时行情失败: %s", exc)
+        return None
+
+
+def _PickRealtimeQuote(
+    sina: dict[str, Any] | None,
+    eastmoney: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """盘中双源校验，优先东财；非盘中优先新浪。"""
+    session_open = IsMarketSessionOpen()
+
+    if sina is not None:
+        sina = {**sina, "source": "sina"}
+    if eastmoney is not None:
+        eastmoney = {**eastmoney, "source": "eastmoney"}
+
+    sina_price = SafeFloat(sina.get("price")) if sina else 0.0
+    em_price = SafeFloat(eastmoney.get("price")) if eastmoney else 0.0
+
+    if session_open:
+        if em_price > 0 and sina_price <= 0:
+            logger.info("实时行情采用东财（新浪无效）: %.2f", em_price)
+            return eastmoney
+        if sina_price > 0 and em_price > 0:
+            diff_pct = abs(sina_price - em_price) / em_price * 100
+            if diff_pct > 0.5:
+                logger.warning(
+                    "新浪(%.2f)与东财(%.2f)偏差 %.2f%%，采用东财",
+                    sina_price, em_price, diff_pct,
+                )
+                return eastmoney
+            logger.info("实时行情采用新浪: %.2f（东财 %.2f）", sina_price, em_price)
+            return sina
+        if em_price > 0:
+            logger.info("实时行情采用东财: %.2f", em_price)
+            return eastmoney
+        if sina_price > 0:
+            logger.info("实时行情采用新浪: %.2f", sina_price)
+            return sina
+        return None
+
+    if sina_price > 0:
+        logger.info("实时行情采用新浪: %.2f", sina_price)
+        return sina
+    if em_price > 0:
+        logger.info("实时行情采用东财: %.2f", em_price)
+        return eastmoney
+    return None
+
+
 def _FetchSinaKline(days: int) -> pd.DataFrame | None:
     """新浪 K 线（前复权）。"""
     end_date = date.today().strftime("%Y%m%d")
@@ -403,44 +551,31 @@ def _NormalizeThsBoards(df: pd.DataFrame) -> pd.DataFrame:
 
 @_Retry(max_retries=3, delay=2)
 def GetRealtimeQuote() -> dict[str, Any] | None:
-    """获取实时行情（优先新浪单股接口）。"""
+    """获取实时行情（新浪 + 东财双源，盘中校验后择优）。"""
+    sina_data: dict[str, Any] | None = None
     try:
-        data = _FetchSinaRealtime()
-        if data is not None:
-            logger.debug("实时行情：新浪单股接口")
-            return data
+        sina_data = _FetchSinaRealtime()
     except Exception as exc:
         logger.warning("新浪实时行情失败: %s", exc)
 
-    try:
-        df = ak.stock_zh_a_spot_em()
-        row = df[df["代码"] == config.STOCK_CODE]
-        if row.empty:
-            return None
-        r = row.iloc[0]
-        logger.debug("实时行情：东方财富")
-        return {
-            "code": str(r["代码"]),
-            "name": str(r["名称"]),
-            "price": SafeFloat(r["最新价"]),
-            "change_pct": SafeFloat(r["涨跌幅"]),
-            "change_amt": SafeFloat(r["涨跌额"]),
-            "open": SafeFloat(r["今开"]),
-            "high": SafeFloat(r["最高"]),
-            "low": SafeFloat(r["最低"]),
-            "prev_close": SafeFloat(r["昨收"]),
-            "volume": SafeFloat(r["成交量"]),
-            "amount": SafeFloat(r["成交额"]),
-            "turnover": SafeFloat(r["换手率"]),
-            "volume_ratio": SafeFloat(r["量比"]),
-            "pe": SafeFloat(r.get("市盈率-动态", 0)),
-            "pb": SafeFloat(r.get("市净率", 0)),
-            "amplitude": SafeFloat(r.get("振幅", 0)),
-            "total_mv": SafeFloat(r.get("总市值", 0)),
-            "circ_mv": SafeFloat(r.get("流通市值", 0)),
-        }
-    except Exception as exc:
-        raise ConnectionError(f"所有实时行情数据源均失败: {exc}") from exc
+    eastmoney_data: dict[str, Any] | None = None
+    if IsMarketSessionOpen() or sina_data is None or SafeFloat(sina_data.get("price")) <= 0:
+        eastmoney_data = _FetchEastmoneyRealtime()
+
+    picked = _PickRealtimeQuote(sina_data, eastmoney_data)
+    if picked is not None:
+        return picked
+
+    if not IsMarketSessionOpen():
+        try:
+            eastmoney_data = eastmoney_data or _FetchEastmoneyRealtime()
+            picked = _PickRealtimeQuote(sina_data, eastmoney_data)
+            if picked is not None:
+                return picked
+        except Exception as exc:
+            logger.warning("东财降级失败: %s", exc)
+
+    raise ConnectionError("所有实时行情数据源均失败")
 
 
 @_Retry(max_retries=3, delay=2)
@@ -629,6 +764,15 @@ def FetchAllData() -> dict[str, Any]:
         data.get("realtime"),
         data.get("kline"),
     )
+    data["kline"] = MergeRealtimeIntoKline(
+        data.get("kline"),
+        data.get("realtime"),
+    )
+    if data.get("realtime") and data.get("kline") is not None:
+        data["realtime"] = _EnrichRealtimeQuote(
+            data.get("realtime"),
+            data.get("kline"),
+        )
 
     success_count = sum(1 for v in data.values() if v is not None)
     logger.info("数据采集完成，成功 %d/7 项", success_count)

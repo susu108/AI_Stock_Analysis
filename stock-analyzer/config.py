@@ -69,7 +69,7 @@ STOCK_NAME: str = os.getenv("STOCK_NAME", "多瑞生物")
 STOCK_MARKET: str = os.getenv("STOCK_MARKET", "sz")
 PUSH_TIME: str = os.getenv("PUSH_TIME", "09:00")
 PUSH_TIMES: list[str] = _ParsePushTimes()
-MANUAL_RUN: bool = _ParseBool(os.getenv("MANUAL_RUN"), True)
+MANUAL_RUN: bool = _ParseBool(os.getenv("MANUAL_RUN"), False)
 KLINE_DAYS: int = _ParseInt(os.getenv("KLINE_DAYS"), 60)
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
