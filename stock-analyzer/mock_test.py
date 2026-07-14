@@ -556,6 +556,8 @@ def RunOilGroupChannelTest() -> bool:
                 and config.DINGTALK_WEBHOOK == "https://hook.oil/example"
                 and config.DINGTALK_SECRET == "SECoil"
                 and config.STOCK_GROUP_LABEL == "石油板块短线"
+                and config.STOCK_GROUP == "oil_short"
+                and config.STOCK_CHANNEL == "oil"
             )
         restore_ok = (
             config.DINGTALK_WEBHOOK == "https://hook.default/example"
@@ -575,6 +577,150 @@ def RunOilGroupChannelTest() -> bool:
         config.DINGTALK_SECRET_OIL = saved_oil_sec
         config.STOCK_GROUP_LABEL = saved_label
         config.STOCK_CODE = saved_code
+
+
+def RunOilShortPlayReportTest() -> bool:
+    """验证石油短线实操章、强讯横幅；医药报告不含石油风险头。"""
+    from dingtalk_pusher import BuildCompactDingTalkReportMarkdown
+    from oil_short_playbook import OIL_SHORT_RISK_HEADER
+
+    saved = {
+        "code": config.STOCK_CODE,
+        "name": config.STOCK_NAME,
+        "group": config.STOCK_GROUP,
+        "channel": config.STOCK_CHANNEL,
+        "label": config.STOCK_GROUP_LABEL,
+        "llm": config.LLM_ENABLED,
+        "market": getattr(config, "STOCK_MARKET", "sz"),
+    }
+    try:
+        config.LLM_ENABLED = False
+        oil_profile = {
+            "code": "600938",
+            "name": "中国海油",
+            "market": "sh",
+            "themes": ["石油", "原油"],
+            "business": "海上油气",
+            "positions": [],
+            "channel": "oil",
+            "group": "oil_short",
+            "group_label": "石油板块短线",
+        }
+        with ApplyStockProfile(oil_profile):
+            data = {
+                "realtime": {
+                    **BuildMockRealtime(),
+                    "price": 28.5,
+                    "change_pct": 1.2,
+                },
+                "kline": BuildMockKline(),
+                "concept": BuildMockConceptBoards(),
+                "industry": BuildMockIndustryBoards(),
+                "fund_flow": BuildMockFundFlow(),
+            }
+            analysis = AnalyzeAll(data)
+            news_bundle = {
+                "items": [],
+                "relevant_items": [
+                    {
+                        "title": "布伦特原油大跌逾4%",
+                        "impact": "跌",
+                        "strength": 5,
+                        "directness": "indirect",
+                        "category": "macro",
+                    },
+                ],
+                "news_score": -70.0,
+            }
+            advice = GenerateAdvice(
+                analysis, data, news_items=[], news_bundle=news_bundle, session_label="盘中",
+            )
+            group_ok = config.STOCK_GROUP == "oil_short"
+            play = advice.get("short_play") or {}
+            alert = advice.get("news_alert") or {}
+            play_ok = (
+                play.get("entry_low")
+                and play.get("stop_loss")
+                and play.get("take_profit_1")
+                and "position_pct" in play
+            )
+            # mock 强讯：覆盖为 strong_bear 验证钉钉文案
+            advice["news_alert"] = {
+                "level": "strong_bear",
+                "score": -78,
+                "headline": "布伦特大跌引发油气集体杀跌",
+                "impact_on_advice": "强烈利空，优先观望止损",
+            }
+            advice["short_play"] = {
+                **play,
+                "mode": "空仓",
+                "tactic": "空仓观望",
+                "position_pct": 0,
+                "entry_low": 27.5,
+                "entry_high": 28.0,
+                "stop_loss": 26.8,
+                "take_profit_1": 29.0,
+                "take_profit_2": 29.8,
+                "hold_days": "不建议持股",
+                "reasons": ["规则测试要点"],
+                "discipline": ["仓位红线"],
+            }
+            oil_report = BuildCompactDingTalkReportMarkdown(
+                data, analysis, advice, session_label="盘中",
+            )
+            oil_ok = (
+                group_ok
+                and play_ok
+                and "强烈利空" in oil_report
+                and "短线实操建议" in oil_report
+                and OIL_SHORT_RISK_HEADER in oil_report
+                and "入场区间" in oil_report
+                and "止损" in oil_report
+                and "止盈" in oil_report
+                and "建议仓位" in oil_report
+            )
+
+        # 医药报告不含石油固定头
+        pharma_profile = {
+            "code": "301075",
+            "name": "多瑞生物",
+            "market": "sz",
+            "themes": ["医药"],
+            "business": "药",
+            "positions": [],
+            "channel": "default",
+            "group": "pharma",
+            "group_label": "医药双股监控",
+        }
+        with ApplyStockProfile(pharma_profile):
+            data_p = {
+                "realtime": BuildMockRealtime(),
+                "kline": BuildMockKline(),
+                "concept": BuildMockConceptBoards(),
+                "industry": BuildMockIndustryBoards(),
+                "fund_flow": BuildMockFundFlow(),
+            }
+            analysis_p = AnalyzeAll(data_p)
+            advice_p = GenerateAdvice(
+                analysis_p, data_p, news_items=[], session_label="盘中",
+            )
+            pharma_report = BuildCompactDingTalkReportMarkdown(
+                data_p, analysis_p, advice_p, session_label="盘中",
+            )
+            pharma_ok = (
+                OIL_SHORT_RISK_HEADER not in pharma_report
+                and "短线实操建议" not in pharma_report
+                and "买卖建议" in pharma_report
+            )
+        return oil_ok and pharma_ok
+    finally:
+        config.STOCK_CODE = saved["code"]
+        config.STOCK_NAME = saved["name"]
+        config.STOCK_GROUP = saved["group"]
+        config.STOCK_CHANNEL = saved["channel"]
+        config.STOCK_GROUP_LABEL = saved["label"]
+        config.LLM_ENABLED = saved["llm"]
+        config.STOCK_MARKET = saved["market"]
 
 
 def RunThemeMismatchTest() -> bool:
@@ -870,6 +1016,9 @@ def RunMockTest() -> None:
     oil_group_ok = RunOilGroupChannelTest()
     print(f"石油双群通道: {'通过' if oil_group_ok else '失败'}")
 
+    oil_short_play_ok = RunOilShortPlayReportTest()
+    print(f"石油短线实操报告: {'通过' if oil_short_play_ok else '失败'}")
+
     news_judge_ok = (
         "资讯研判" in report
         and "个股直接利好" in report
@@ -889,7 +1038,8 @@ def RunMockTest() -> None:
         or not compact_ok or not full_mode_ok
         or not kline_merge_ok or not tail_horizon_ok
         or not theme_mismatch_ok or not trading_day_date_ok
-        or not multi_stock_ok or not oil_group_ok or not news_judge_ok
+        or not multi_stock_ok or not oil_group_ok
+        or not oil_short_play_ok or not news_judge_ok
     ):
         raise SystemExit(1)
 

@@ -21,6 +21,8 @@ def ApplyStockProfile(profile: dict[str, Any]) -> Iterator[None]:
         "DINGTALK_WEBHOOK": config.DINGTALK_WEBHOOK,
         "DINGTALK_SECRET": config.DINGTALK_SECRET,
         "STOCK_GROUP_LABEL": config.STOCK_GROUP_LABEL,
+        "STOCK_GROUP": config.STOCK_GROUP,
+        "STOCK_CHANNEL": config.STOCK_CHANNEL,
     }
     try:
         config.STOCK_CODE = str(profile.get("code", "")).strip()
@@ -38,7 +40,9 @@ def ApplyStockProfile(profile: dict[str, Any]) -> Iterator[None]:
         else:
             config.POSITIONS = []
         config.STOCK_GROUP_LABEL = str(profile.get("group_label", "")).strip()
-        webhook, secret = config.ResolveDingtalkChannel(str(profile.get("channel", "default")))
+        config.STOCK_GROUP = str(profile.get("group", "default")).strip() or "default"
+        config.STOCK_CHANNEL = str(profile.get("channel", "default")).strip() or "default"
+        webhook, secret = config.ResolveDingtalkChannel(config.STOCK_CHANNEL)
         config.DINGTALK_WEBHOOK = webhook
         config.DINGTALK_SECRET = secret
         yield
@@ -52,6 +56,8 @@ def ApplyStockProfile(profile: dict[str, Any]) -> Iterator[None]:
         config.DINGTALK_WEBHOOK = saved["DINGTALK_WEBHOOK"]
         config.DINGTALK_SECRET = saved["DINGTALK_SECRET"]
         config.STOCK_GROUP_LABEL = saved["STOCK_GROUP_LABEL"]
+        config.STOCK_GROUP = saved["STOCK_GROUP"]
+        config.STOCK_CHANNEL = saved["STOCK_CHANNEL"]
 
 
 def FilterProfilesByCode(

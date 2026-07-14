@@ -13,6 +13,7 @@ from typing import Any
 import requests
 
 import config
+from oil_short_playbook import IsOilShortGroup, OIL_SHORT_RISK_HEADER
 from trade_zones import ResolveTierRecommended
 from utils import (
     FormatAmount,
@@ -1436,6 +1437,9 @@ def _BuildCompactHeaderSection(
         "",
         f"**买卖建议** 买 {_EmAction(buy_action)} ｜ 卖 {_EmAction(sell_action)}",
     ])
+    banner = _FormatOilNewsAlertBanner(advice)
+    if banner:
+        lines.extend(["", banner])
     if add_tier1.get("low") and add_tier1.get("high"):
         rec1 = ResolveTierRecommended(add_tier1, "buy")
         if rec1 > 0:
@@ -1452,6 +1456,21 @@ def _BuildCompactHeaderSection(
         lines.extend(["", f"**综合结论** {_TruncateText(ai_conclusion, 150)}"])
     lines.append("")
     return lines
+
+
+def _FormatOilNewsAlertBanner(advice: dict[str, Any]) -> str:
+    """强讯横幅：强烈利好/强烈利空。"""
+    if not IsOilShortGroup():
+        return ""
+    alert = advice.get("news_alert") or {}
+    level = str(alert.get("level", "none"))
+    if level not in ("strong_bull", "strong_bear"):
+        return ""
+    score = alert.get("score", 0)
+    headline = str(alert.get("headline", "")).strip() or "地缘/原油相关资讯"
+    if level == "strong_bear":
+        return f"**【强烈利空】** {_TruncateText(headline, 60)}（打分 {score}）"
+    return f"**【强烈利好】** {_TruncateText(headline, 60)}（打分 +{abs(int(score))}）"
 
 
 def _BuildCompactNewsSection(
@@ -1489,11 +1508,15 @@ def _BuildCompactNewsSection(
         news_summary or sector_impact or policy_impact or theme_mismatch_note
         or news_impact or news_conclusion
         or direct_bullish or direct_bearish or indirect_items or mismatch_items
+        or (IsOilShortGroup() and _FormatOilNewsAlertBanner(advice))
     )
     if not has_content:
         return []
 
     lines: list[str] = [""]
+    banner = _FormatOilNewsAlertBanner(advice)
+    if banner:
+        lines.append(f"- {banner}")
     if stats:
         lines.append(
             f"- 采集 **{stats.get('total', 0)}** 条"
@@ -1661,6 +1684,65 @@ def _BuildCompactPriceMoveSection(
     return lines
 
 
+def _BuildCompactOilShortPlaySection(
+    advice: dict[str, Any],
+    ai_tag: str,
+) -> list[str]:
+    """石油组：短线实操建议章。"""
+    play = advice.get("short_play") or {}
+    alert = advice.get("news_alert") or {}
+    plan = advice.get("trade_plan") or {}
+    zones = plan if plan.get("add_tier1") else (advice.get("trade_zones") or {})
+    at1 = zones.get("add_tier1", {})
+    st1 = zones.get("sell_tier1", {})
+    st2 = zones.get("sell_tier2", {})
+
+    lines: list[str] = [
+        "",
+        f"- **风险提示** {OIL_SHORT_RISK_HEADER}",
+        f"- **玩法** {play.get('mode', '观望')} ｜ **战术** {play.get('tactic', '空仓观望')}",
+        f"- **建议仓位** **{play.get('position_pct', 0)}%** ｜ "
+        f"**持仓** {play.get('hold_days', '不建议持股')}",
+        f"- **入场区间** {_BoldPriceRange(float(play.get('entry_low', 0) or 0), float(play.get('entry_high', 0) or 0))}",
+        f"- **止损** {_BoldPrice(float(play.get('stop_loss', 0) or 0), 'down')} ｜ "
+        f"**止盈1** {_BoldPrice(float(play.get('take_profit_1', 0) or 0), 'up')} ｜ "
+        f"**止盈2** {_BoldPrice(float(play.get('take_profit_2', 0) or 0), 'up')}",
+        f"- **买/卖动作** {_EmAction(str(advice.get('buy_action', '观望')))} ｜ "
+        f"{_EmAction(str(advice.get('sell_action', '持有')))}",
+    ]
+    impact = str(alert.get("impact_on_advice", "")).strip()
+    if impact:
+        lines.append(f"- **资讯约束** {_TruncateText(impact, 100)}")
+    reasons = play.get("reasons") or []
+    if reasons:
+        lines.extend(["", "**操作要点**"])
+        for i, r in enumerate(reasons[:4], 1):
+            lines.append(f"- **{i}.** {_HighlightMetricsInText(str(r))}")
+    discipline = play.get("discipline") or []
+    if discipline:
+        lines.extend(["", "**硬纪律**"])
+        for i, d in enumerate(discipline[:5], 1):
+            lines.append(f"- **{i}.** {_HighlightMetricsInText(str(d))}")
+
+    # 保留简化四档作技术锚点
+    if at1.get("low") and at1.get("high"):
+        lines.extend([
+            "",
+            "**技术锚点（四档参考）**",
+            f"- 加一 {_BoldPriceRange(float(at1.get('low', 0)), float(at1.get('high', 0)))}",
+        ])
+        if st1.get("low"):
+            lines.append(
+                f"- 卖一 {_BoldPriceRange(float(st1.get('low', 0)), float(st1.get('high', 0) or st1.get('low', 0)))}"
+            )
+        if st2.get("low"):
+            lines.append(
+                f"- 卖二 {_BoldPriceRange(float(st2.get('low', 0)), float(st2.get('high', 0) or st2.get('low', 0)))}"
+            )
+    lines.append("")
+    return lines
+
+
 def _BuildCompactTradeAdviceSection(
     advice: dict[str, Any],
     ai_tag: str,
@@ -1668,6 +1750,9 @@ def _BuildCompactTradeAdviceSection(
     sell_icon: str,
 ) -> list[str]:
     """构建精简版买卖建议（去掉与速览/预测重复的依据与操作策略）。"""
+    if IsOilShortGroup() and advice.get("short_play"):
+        return _BuildCompactOilShortPlaySection(advice, ai_tag)
+
     levels = ResolveTradeDisplayLevels(advice)
     plan = advice.get("trade_plan") or {}
     zones = plan if plan.get("add_tier1") else (advice.get("trade_zones") or {})
@@ -1806,7 +1891,10 @@ def BuildCompactDingTalkReportMarkdown(
     lines.extend([
         _SectionDivider(),
         "",
-        _NextSection(sec, f"买卖建议{ai_tag}"),
+        _NextSection(
+            sec,
+            f"短线实操建议{ai_tag}" if IsOilShortGroup() else f"买卖建议{ai_tag}",
+        ),
     ])
     lines.extend(_BuildCompactTradeAdviceSection(advice, ai_tag, buy_icon, sell_icon))
 

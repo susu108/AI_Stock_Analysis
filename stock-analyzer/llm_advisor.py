@@ -11,10 +11,23 @@ import requests
 import config
 from market_context import ResolvePredictionHorizon
 from news_context import ComputeSectorThemeOverlap, ComputeStockVsSectorDivergence
+from oil_short_advisor import (
+    AggregateOilNewsAlert,
+    ApplyOilNewsConstraints,
+    BuildRuleShortPlayFallback,
+    ParseNewsAlertFromLlm,
+    ParseShortPlayFromLlm,
+)
+from oil_short_playbook import (
+    FormatPositionCapNote,
+    IsOilShortGroup,
+    OIL_SHORT_PLAYBOOK,
+    OIL_SHORT_RISK_HEADER,
+)
 from portfolio import CalcPortfolioSummary, FormatPortfolioText, PortfolioToDict
 from price_context import FormatPriceContextText
 from trade_zones import EnvelopeFromTradeZones, ParseTradePlanFromLlm
-from utils import SetupLogger
+from utils import SafeFloat, SetupLogger
 
 logger = SetupLogger(config.LOG_LEVEL)
 
@@ -244,12 +257,54 @@ def BuildAnalysisContext(
                 if by_cat.get(cat):
                     context_parts.extend([""] + _FormatNewsSection(label, by_cat[cat], 6))
 
+    if IsOilShortGroup():
+        oil_alert = bundle.get("oil_news_alert") or AggregateOilNewsAlert(
+            bundle, SafeFloat(analysis.get("news_score")),
+        )
+        context_parts.extend([
+            "",
+            "【石油短线实操手册 — 必须遵守】",
+            OIL_SHORT_PLAYBOOK,
+            "",
+            f"【本股仓位上限】{FormatPositionCapNote()}",
+            f"【风险头】{OIL_SHORT_RISK_HEADER}",
+            "禁止给出中长线重仓躺股、格局持有等建议。",
+            f"【聚合资讯警报】level={oil_alert.get('level')} "
+            f"score={oil_alert.get('score')} "
+            f"headline={oil_alert.get('headline', '')}",
+        ])
+
     return "\n".join(context_parts)
+
+
+def _BuildOilShortPlayPromptSuffix() -> str:
+    """石油组追加 JSON 字段与原则。"""
+    return (
+        "【石油短线专属必填】"
+        "short_play对象：mode（日内T|波段1-3天|观望|空仓）；"
+        "position_pct（占账户资金%，遵守仓位红线）；"
+        "entry_low/entry_high（入场支撑区间）；"
+        "stop_loss（止损价）；take_profit_1/take_profit_2（止盈价）；"
+        "hold_days（当日|1-3天|不建议持股）；"
+        "tactic（正T|反T|波段低吸|空仓观望）；"
+        "reasons（字符串数组2-4条）；discipline（硬纪律2-5条）；"
+        "news_alert对象：level（strong_bull|strong_bear|mild_bull|mild_bear|none）；"
+        "score（-100~100）；headline（一句话）；"
+        "impact_on_advice（如何调仓位与动作）；"
+        "石油原则："
+        "A. 单日涨幅>4%禁止新开仓，冲高只建议反T；"
+        "B. position_pct 不得超过本股仓位上限，赛道合计观念≤20%；"
+        "C. strong_bear→buy_action=观望且position_pct趋0；"
+        "D. strong_bull且涨幅已大→反T优先勿追多；"
+        "E. 地缘缓和/原油大跌倾向减仓空仓；"
+        "F. risk_warning 必须以短线风险头语义开头；"
+        "G. 禁止中长线重仓躺股。"
+    )
 
 
 def _BuildSystemPrompt(mode: str = "daily") -> str:
     stock = config.STOCK_CODE
-    return (
+    base = (
         "你是一位专业的 A 股分析师，擅长结合技术面、资金面、板块面、政策面、宏观面"
         "与多源资讯给出实用交易建议。"
         "请基于用户提供的数据进行分析，输出严格的 JSON 格式，不要包含 markdown 代码块。"
@@ -319,6 +374,9 @@ def _BuildSystemPrompt(mode: str = "daily") -> str:
         "11. 理由必须引用提供的数据，不要编造；"
         "12. 仅输出 JSON，不要有其他文字。"
     )
+    if IsOilShortGroup():
+        return base + _BuildOilShortPlayPromptSuffix()
+    return base
 
 
 def CallDeepSeek(context: str, mode: str = "daily") -> dict[str, Any] | None:
@@ -673,6 +731,56 @@ def ParsePredictionsFromLlm(
     }
 
 
+def _AttachOilShortPlay(
+    advice: dict[str, Any],
+    analysis: dict[str, Any],
+    data: dict[str, Any],
+    news_bundle: dict[str, Any] | None,
+    llm_result: dict[str, Any] | None = None,
+) -> None:
+    """为石油组写入 short_play / news_alert（含规则兜底与硬约束）。"""
+    if not IsOilShortGroup():
+        return
+    short_fb, alert_fb = BuildRuleShortPlayFallback(
+        advice, analysis, data, news_bundle,
+    )
+    overrides = alert_fb.pop("_advice_overrides", {}) or {}
+    if llm_result:
+        short_play = ParseShortPlayFromLlm(llm_result, short_fb)
+        news_alert = ParseNewsAlertFromLlm(llm_result, alert_fb)
+    else:
+        short_play = short_fb
+        news_alert = alert_fb
+        if overrides.get("buy_action"):
+            advice["buy_action"] = overrides["buy_action"]
+            advice["buy_ok"] = _MapBuyOk(str(overrides["buy_action"]))
+        if overrides.get("sell_action"):
+            advice["sell_action"] = overrides["sell_action"]
+            advice["sell_ok"] = _MapSellOk(str(overrides["sell_action"]))
+
+    change_pct = SafeFloat((data.get("realtime") or {}).get("change_pct"))
+    short_play, buy_action, sell_action = ApplyOilNewsConstraints(
+        short_play, news_alert, change_pct,
+    )
+    advice["short_play"] = short_play
+    advice["news_alert"] = news_alert
+    advice["buy_action"] = buy_action
+    advice["sell_action"] = sell_action
+    advice["buy_ok"] = _MapBuyOk(buy_action)
+    advice["sell_ok"] = _MapSellOk(sell_action)
+    risk = str(advice.get("risk_warning") or "").strip()
+    if OIL_SHORT_RISK_HEADER not in risk:
+        risk = f"{OIL_SHORT_RISK_HEADER}" + (f"；{risk}" if risk else "")
+    advice["risk_warning"] = risk
+    plan = advice.get("trade_plan")
+    if isinstance(plan, dict):
+        plan_risk = str(plan.get("risk_warning") or "").strip()
+        if OIL_SHORT_RISK_HEADER not in plan_risk:
+            plan["risk_warning"] = (
+                f"{OIL_SHORT_RISK_HEADER}" + (f"；{plan_risk}" if plan_risk else "")
+            )
+
+
 def EnhanceAdviceWithLlm(
     analysis: dict[str, Any],
     data: dict[str, Any],
@@ -702,6 +810,7 @@ def EnhanceAdviceWithLlm(
             analysis, horizon, base_advice,
         )
         base_advice["direction_prediction"] = base_advice["predictions"]["near_term"]["prediction"]
+        _AttachOilShortPlay(base_advice, analysis, data, news_bundle)
         return base_advice
 
     context = BuildAnalysisContext(
@@ -718,6 +827,7 @@ def EnhanceAdviceWithLlm(
             analysis, horizon, base_advice,
         )
         base_advice["direction_prediction"] = base_advice["predictions"]["near_term"]["prediction"]
+        _AttachOilShortPlay(base_advice, analysis, data, news_bundle)
         return base_advice
 
     strategy = str(llm_result.get("strategy", "")).strip()
@@ -799,12 +909,13 @@ def EnhanceAdviceWithLlm(
 
     base_advice["llm_used"] = True
     base_advice["pricing_source"] = pricing_source
+    _AttachOilShortPlay(base_advice, analysis, data, news_bundle, llm_result)
 
     logger.info(
         "DeepSeek 分析完成 — 买入:%s 卖出:%s 加一:%.2f~%.2f 加二:%.2f~%.2f"
         " 卖一:%.2f~%.2f 卖二:%.2f~%.2f",
-        buy_action,
-        sell_action,
+        base_advice.get("buy_action", buy_action),
+        base_advice.get("sell_action", sell_action),
         trade_zones["add_tier1"]["low"],
         trade_zones["add_tier1"]["high"],
         trade_zones["add_tier2"]["low"],

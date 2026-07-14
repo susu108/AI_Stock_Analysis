@@ -15,6 +15,8 @@ from news_context import (
     ComputeSectorThemeOverlap,
     ComputeStockVsSectorDivergence,
 )
+from oil_short_advisor import AggregateOilNewsAlert
+from oil_short_playbook import IsOilShortGroup
 from utils import SafeFloat, SetupLogger
 
 logger = SetupLogger(config.LOG_LEVEL)
@@ -27,9 +29,25 @@ _IRRELEVANT_KEYWORDS = (
     "国事访问", "欢迎.*访华", "会谈", "会见", "仪式", "致电", "贺电",
     "NBA", "英超", "世界杯",
 )
+_OIL_DOMAIN_HINT = (
+    "原油、布伦特、WTI、OPEC、中东、伊朗、霍尔木兹海峡、地缘冲突、"
+    "油服、页岩油、油气开采、海上油气、炼化仅作背景"
+)
+
+
+def _DomainLabel() -> str:
+    return "石油/油气/A股" if IsOilShortGroup() else "医药/A股"
 
 
 def _BuildNewsScoringPrompt(stock_name: str, stock_code: str) -> str:
+    domain = _DomainLabel()
+    oil_extra = ""
+    if IsOilShortGroup():
+        oil_extra = (
+            f"相关域优先：{_OIL_DOMAIN_HINT}。"
+            "地缘冲突升级/制裁/通航中断通常偏涨；和谈/缓和/原油大跌通常偏跌。"
+            "弱化医药生物类过滤；炼化利润挤压且无上游联动时勿过度标涨。"
+        )
     return (
         f"你是 A 股资讯分析师。请评估每条资讯对 {stock_name}({stock_code}) 的影响。"
         "输出严格 JSON，不要 markdown 代码块。"
@@ -49,7 +67,8 @@ def _BuildNewsScoringPrompt(stock_name: str, stock_code: str) -> str:
         "4. 若个股涨跌与板块方向明显背离（上下文已给偏离度），"
         "板块类资讯优先 mismatch 而非涨；"
         "5. 禁止无证据写「产业链受益」「题材匹配」；"
-        "6. relevant=false 或 impact=无关 仅用于与医药/A股完全无关的内容；"
+        f"6. relevant=false 或 impact=无关 仅用于与{domain}完全无关的内容；"
+        f"{oil_extra}"
         "7. strength 表示影响强度，5 最强。仅输出 JSON。"
     )
 
@@ -117,7 +136,7 @@ def _CallNewsScoring(context: str) -> list[dict[str, Any]] | None:
 
 
 def _IsClearlyIrrelevant(title: str, content: str) -> bool:
-    """判断资讯是否与医药/A股明显无关。"""
+    """判断资讯是否与目标板块/A股明显无关。"""
     text = f"{title} {content}"
     for pattern in _IRRELEVANT_KEYWORDS:
         if re.search(pattern, text):
@@ -137,6 +156,7 @@ def _NormalizeDirectness(raw: Any, category: str) -> str:
 
 def _ApplyCategoryRelevanceGuard(scored: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """对板块/政策/宏观类资讯应用分类保底，避免被 AI 过度标为无关。"""
+    domain = _DomainLabel()
     guarded: list[dict[str, Any]] = []
     for item in scored:
         cat = str(item.get("category", "stock"))
@@ -162,7 +182,7 @@ def _ApplyCategoryRelevanceGuard(scored: list[dict[str, Any]]) -> list[dict[str,
                     "strength": max(int(item.get("strength", 1) or 1), 1),
                 }
                 if not item.get("impact_reason"):
-                    item["impact_reason"] = "对医药板块或A股环境有间接影响"
+                    item["impact_reason"] = f"对{domain}环境有间接影响"
         guarded.append(item)
     return guarded
 
@@ -246,15 +266,35 @@ def _ApplyRuleFallback(
                 "relevant": False,
                 "impact": "无关",
                 "directness": "indirect",
-                "impact_reason": "与医药/A股无关",
+                "impact_reason": f"与{_DomainLabel()}无关",
                 "strength": 1,
             })
             continue
+
+        text = f"{title} {content}"
+        oil_boost = IsOilShortGroup() and any(
+            kw in text
+            for kw in (
+                "原油", "布伦特", "WTI", "OPEC", "中东", "伊朗",
+                "海峡", "地缘", "油服", "页岩油", "油气",
+            )
+        )
 
         if cat == "stock":
             directness = "direct"
             impact = "中性"
             strength = 3
+        elif oil_boost:
+            directness = "indirect"
+            if any(k in text for k in ("大跌", "缓和", "通航", "停火", "和谈")):
+                impact = "跌"
+                strength = 4
+            elif any(k in text for k in ("冲突", "制裁", "袭击", "封锁", "减产")):
+                impact = "涨"
+                strength = 4
+            else:
+                impact = "中性"
+                strength = 3
         elif overlap.get("overlap_level") == "低" and cat in ("sector", "policy", "web_search"):
             directness = "mismatch"
             impact = "跌" if divergence < -2.0 else "中性"
@@ -436,6 +476,8 @@ def AnalyzeNewsImpact(
         news_bundle["background_items"] = []
         news_bundle["news_score"] = 0.0
         news_bundle["news_signals"] = []
+        if IsOilShortGroup():
+            news_bundle["oil_news_alert"] = AggregateOilNewsAlert(news_bundle, 0.0)
         return news_bundle
 
     company_context = BuildCompanyNewsContext(data, news_bundle)
@@ -495,6 +537,8 @@ def AnalyzeNewsImpact(
         "bearish": bearish_count,
         "mismatch": mismatch_count,
     }
+    if IsOilShortGroup():
+        news_bundle["oil_news_alert"] = AggregateOilNewsAlert(news_bundle, news_score)
 
     logger.info(
         "资讯影响分析 — 有关:%d 直接涨/跌:%d 背景/错配:%d 无关:%d ｜ "
