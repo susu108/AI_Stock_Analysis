@@ -98,6 +98,9 @@ def _NormalizeStockProfile(item: dict[str, Any]) -> dict[str, Any] | None:
         positions = positions_raw
     else:
         positions = []
+    channel = str(item.get("channel", "default")).strip() or "default"
+    group = str(item.get("group", "default")).strip() or "default"
+    group_label = str(item.get("group_label", "")).strip()
     return {
         "code": code,
         "name": name,
@@ -105,6 +108,9 @@ def _NormalizeStockProfile(item: dict[str, Any]) -> dict[str, Any] | None:
         "themes": themes,
         "business": business,
         "positions": positions,
+        "channel": channel,
+        "group": group,
+        "group_label": group_label,
     }
 
 
@@ -130,9 +136,12 @@ def _ParseStockProfiles(raw: str | None) -> list[dict[str, Any]]:
 
 DINGTALK_WEBHOOK: str = os.getenv("DINGTALK_WEBHOOK", "")
 DINGTALK_SECRET: str = os.getenv("DINGTALK_SECRET", "")
+DINGTALK_WEBHOOK_OIL: str = os.getenv("DINGTALK_WEBHOOK_OIL", "")
+DINGTALK_SECRET_OIL: str = os.getenv("DINGTALK_SECRET_OIL", "")
 STOCK_CODE: str = os.getenv("STOCK_CODE", "301075")
 STOCK_NAME: str = os.getenv("STOCK_NAME", "多瑞生物")
 STOCK_MARKET: str = os.getenv("STOCK_MARKET", "sz")
+STOCK_GROUP_LABEL: str = ""
 PUSH_TIME: str = os.getenv("PUSH_TIME", "09:00")
 PUSH_TIMES: list[str] = _ParsePushTimes()
 MANUAL_RUN: bool = _ParseBool(os.getenv("MANUAL_RUN"), False)
@@ -178,6 +187,14 @@ REPORT_WEB_LOCAL_HINT: bool = _ParseBool(os.getenv("REPORT_WEB_LOCAL_HINT"), Tru
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def ResolveDingtalkChannel(channel: str) -> tuple[str, str]:
+    """按 channel 解析钉钉 Webhook / Secret。"""
+    key = (channel or "default").strip().lower() or "default"
+    if key == "oil":
+        return DINGTALK_WEBHOOK_OIL, DINGTALK_SECRET_OIL
+    return DINGTALK_WEBHOOK, DINGTALK_SECRET
+
+
 def ResolveStockProfiles() -> list[dict[str, Any]]:
     """解析监控股票列表；未配置 STOCK_PROFILES 时回退为单股配置。"""
     profiles = _ParseStockProfiles(os.getenv("STOCK_PROFILES"))
@@ -190,6 +207,9 @@ def ResolveStockProfiles() -> list[dict[str, Any]]:
         "themes": list(STOCK_THEMES),
         "business": STOCK_BUSINESS,
         "positions": list(POSITIONS),
+        "channel": "default",
+        "group": "default",
+        "group_label": "",
     }]
 
 

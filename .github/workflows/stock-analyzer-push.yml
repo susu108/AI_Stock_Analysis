@@ -1,5 +1,6 @@
 # 股票分析钉钉定时推送（GitHub Actions）
 # 北京时间 09:00 / 11:30 / 14:30，每日触发（含周末与法定节假日）
+# matrix: pharma → 旧群；oil_short → 石油短线新群
 
 name: Stock Analyzer Push
 
@@ -35,7 +36,11 @@ permissions:
 jobs:
   push-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [pharma, oil_short]
     defaults:
       run:
         working-directory: stock-analyzer
@@ -58,6 +63,8 @@ jobs:
         env:
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
           DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          DINGTALK_WEBHOOK_OIL: ${{ secrets.DINGTALK_WEBHOOK_OIL }}
+          DINGTALK_SECRET_OIL: ${{ secrets.DINGTALK_SECRET_OIL }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL }}
           DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL }}
@@ -76,6 +83,8 @@ jobs:
           cat > .env << EOF
           DINGTALK_WEBHOOK=${DINGTALK_WEBHOOK}
           DINGTALK_SECRET=${DINGTALK_SECRET}
+          DINGTALK_WEBHOOK_OIL=${DINGTALK_WEBHOOK_OIL}
+          DINGTALK_SECRET_OIL=${DINGTALK_SECRET_OIL}
           STOCK_CODE=${STOCK_CODE:-301075}
           STOCK_NAME=${STOCK_NAME:-多瑞生物}
           STOCK_MARKET=${STOCK_MARKET:-sz}
@@ -123,8 +132,10 @@ jobs:
       - name: Run daily analysis and push
         run: |
           PT="${{ steps.resolve_time.outputs.push_time }}"
-          CMD=(python main.py --scheduled)
+          GROUP="${{ matrix.group }}"
+          CMD=(python main.py --scheduled --group "$GROUP")
           if [ -n "$PT" ]; then
             CMD+=(--push-time "$PT")
           fi
+          echo "Running group=$GROUP push_time=${PT:-auto}"
           "${CMD[@]}"

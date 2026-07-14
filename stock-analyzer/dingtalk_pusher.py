@@ -2139,6 +2139,12 @@ def SendMarkdown(title: str, text: str) -> bool:
         return False
 
 
+def _ReportTitlePrefix() -> str:
+    """钉钉标题可选分组前缀。"""
+    label = str(getattr(config, "STOCK_GROUP_LABEL", "") or "").strip()
+    return f"{label}｜" if label else ""
+
+
 def PushReport(
     data: dict[str, Any],
     analysis: dict[str, Any],
@@ -2148,7 +2154,10 @@ def PushReport(
     push_time: str | None = None,
 ) -> bool:
     """生成并推送完整分析报告到钉钉。"""
-    title = f"{config.STOCK_NAME}({config.STOCK_CODE}) {session_label}分析报告"
+    title = (
+        f"{_ReportTitlePrefix()}{config.STOCK_NAME}({config.STOCK_CODE}) "
+        f"{session_label}分析报告"
+    )
     text = BuildDingTalkReportMarkdown(
         data, analysis, advice, session_label, report_mode,
     )
@@ -2157,16 +2166,19 @@ def PushReport(
 
 def PushPortfolioReport(portfolio_advice: dict[str, Any]) -> bool:
     """推送持仓专报。"""
-    title = f"{config.STOCK_NAME}({config.STOCK_CODE}) 分账户持仓建议"
+    title = (
+        f"{_ReportTitlePrefix()}{config.STOCK_NAME}({config.STOCK_CODE}) "
+        f"分账户持仓建议"
+    )
     text = BuildPortfolioReportMarkdown(portfolio_advice)
     return SendMarkdown(title, text)
 
 
 def PushErrorNotice(message: str = "核心数据获取失败，请检查网络连接") -> bool:
     """推送数据异常通知。"""
-    title = f"{config.STOCK_NAME} 数据异常通知"
+    title = f"{_ReportTitlePrefix()}{config.STOCK_NAME} 数据异常通知"
     text = (
-        f"# ⚠️ {config.STOCK_NAME}({config.STOCK_CODE}) 数据异常\n\n"
+        f"# ⚠️ {_ReportTitlePrefix()}{config.STOCK_NAME}({config.STOCK_CODE}) 数据异常\n\n"
         f"> {NowStr()}\n\n"
         f"{message}\n\n"
         f"---\n"

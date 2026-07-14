@@ -19,7 +19,7 @@ from news_analyzer import AnalyzeNewsImpact
 from news_fetcher import FetchNews, FlattenNewsItems
 from portfolio_advisor import GeneratePortfolioAdvice
 from scheduler_guard import ReleasePushSlot, TryAcquireSchedulerLock, TryClaimPushSlot
-from stock_profile import ApplyStockProfile, FilterProfilesByCode
+from stock_profile import ApplyStockProfile, FilterProfilesByCode, FilterProfilesByGroup
 from utils import NowStr, SetupLogger
 
 logger = SetupLogger(config.LOG_LEVEL)
@@ -68,6 +68,12 @@ def ParseArgs() -> argparse.Namespace:
         default=None,
         help="仅分析并推送指定股票代码（如 301201），默认推送 STOCK_PROFILES 中全部",
     )
+    parser.add_argument(
+        "--group",
+        type=str,
+        default=None,
+        help="仅推送指定监控组（如 pharma / oil_short），默认全部",
+    )
     return parser.parse_args()
 
 
@@ -96,9 +102,14 @@ def Job(
     push_time: str | None = None,
     force_run: bool = False,
     stock_code: str | None = None,
+    group: str | None = None,
 ) -> None:
     """执行一次日常实时分析推送（不含持仓），支持多股 profile 循环。"""
-    profiles = FilterProfilesByCode(config.ResolveStockProfiles(), stock_code)
+    profiles = FilterProfilesByGroup(config.ResolveStockProfiles(), group)
+    profiles = FilterProfilesByCode(profiles, stock_code)
+    if group and not profiles:
+        logger.error("未找到监控组 %s 的 profile 配置", group)
+        return
     if stock_code and not profiles:
         logger.error("未找到股票代码 %s 的 profile 配置", stock_code)
         PushErrorNotice(f"未找到股票 {stock_code} 的监控配置")
@@ -121,9 +132,12 @@ def _JobForCurrentProfile(
     """对当前 config 中的股票执行一次日常分析推送。"""
     label = session_label or GetSessionLabel(push_time)
     run_mode = "手动实时" if force_run else "定时"
+    group_tag = config.STOCK_GROUP_LABEL or ""
+    prefix = f"[{group_tag}/{config.STOCK_CODE}] " if group_tag else f"[{config.STOCK_CODE}] "
     logger.info("=" * 50)
     logger.info(
-        "开始执行 %s(%s) %s日常分析 — 时段:%s ｜ %s",
+        "%s开始执行 %s(%s) %s日常分析 — 时段:%s ｜ %s",
+        prefix,
         config.STOCK_NAME,
         config.STOCK_CODE,
         run_mode,
@@ -284,31 +298,36 @@ def Main() -> None:
 
     if args.scheduled:
         label = GetSessionLabel(args.push_time)
-        profile_count = len(FilterProfilesByCode(config.ResolveStockProfiles(), args.stock_code))
+        profiles = FilterProfilesByGroup(config.ResolveStockProfiles(), args.group)
+        profiles = FilterProfilesByCode(profiles, args.stock_code)
         logger.info(
-            "股票分析工具 — 模式:外部调度 push_time=%s 时段=%s 监控%d只股票",
+            "股票分析工具 — 模式:外部调度 push_time=%s 时段=%s group=%s 监控%d只股票",
             args.push_time or "auto",
             label,
-            profile_count,
+            args.group or "全部",
+            len(profiles),
         )
         Job(
             session_label=label,
             push_time=args.push_time,
             force_run=False,
             stock_code=args.stock_code,
+            group=args.group,
         )
         return
 
     is_manual = args.now or config.MANUAL_RUN
-    profile_count = len(FilterProfilesByCode(config.ResolveStockProfiles(), args.stock_code))
+    profiles = FilterProfilesByGroup(config.ResolveStockProfiles(), args.group)
+    profiles = FilterProfilesByCode(profiles, args.stock_code)
     logger.info(
-        "股票分析钉钉推送工具启动 — 模式:%s 监控%d只股票",
+        "股票分析钉钉推送工具启动 — 模式:%s group=%s 监控%d只股票",
         "手动日常" if is_manual else "定时",
-        profile_count,
+        args.group or "全部",
+        len(profiles),
     )
 
     if is_manual:
-        Job(force_run=True, stock_code=args.stock_code)
+        Job(force_run=True, stock_code=args.stock_code, group=args.group)
         return
 
     if args.local_scheduler or config.ENABLE_LOCAL_SCHEDULER:
@@ -318,6 +337,7 @@ def Main() -> None:
     logger.info(
         "本地定时调度已关闭（方案 A：由 cron-job.org → GitHub Actions 推送）。"
         "手动推送: python main.py --now ｜ "
+        "分组推送: python main.py --now --group oil_short ｜ "
         "单股推送: python main.py --now --stock-code 301201 ｜ "
         "如需本地常驻调度: python main.py --local-scheduler 或 .env 设 ENABLE_LOCAL_SCHEDULER=true"
     )

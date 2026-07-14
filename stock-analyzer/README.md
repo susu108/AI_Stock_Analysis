@@ -24,8 +24,10 @@ python main.py --portfolio
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `DINGTALK_WEBHOOK` | 钉钉机器人 Webhook URL | 必填 |
+| `DINGTALK_WEBHOOK` | 钉钉机器人 Webhook URL（医药默认群） | 必填 |
 | `DINGTALK_SECRET` | 加签密钥（SEC开头） | 可选 |
+| `DINGTALK_WEBHOOK_OIL` | 石油板块短线专属群 Webhook | 石油组必填 |
+| `DINGTALK_SECRET_OIL` | 石油专属群加签密钥 | 可选 |
 | `STOCK_CODE` | 股票代码 | 301075 |
 | `STOCK_NAME` | 股票名称 | 多瑞生物 |
 | `PUSH_TIMES` | 多次推送，逗号分隔 | 09:00,11:30,14:30 |
@@ -43,19 +45,28 @@ python main.py --portfolio
 | `REPORT_WEB_OUTPUT_DIR` | HTML 输出目录（相对仓库根） | docs/reports |
 | `REPORT_WEB_RETENTION` | 保留历史报告份数 | 30 |
 
-## 多股监控
+## 多股监控与双钉钉群
 
-通过 `STOCK_PROFILES` 可同时监控多只股票，每只股票使用相同的分析模型（行情/资讯/LLM/涨跌归因），在同一钉钉群**各推送一条**独立报告。
+通过 `STOCK_PROFILES` 可同时监控多只股票；每只股票用同一套分析模型，**各推一条**独立报告。用 `channel` / `group` 分到不同钉钉群：
+
+| group | channel | 钉钉群 |
+|-------|---------|--------|
+| `pharma` | `default` | `DINGTALK_WEBHOOK`（医药旧群） |
+| `oil_short` | `oil` | `DINGTALK_WEBHOOK_OIL`（石油短线新群） |
 
 ```env
-STOCK_PROFILES=[{"code":"301075","name":"多瑞生物",...,"positions":[...]},{"code":"301201","name":"诚达药业",...,"positions":[]}]
+DINGTALK_WEBHOOK_OIL=https://oapi.dingtalk.com/robot/send?access_token=...
+DINGTALK_SECRET_OIL=SEC...
+STOCK_PROFILES=[{"code":"301075",...,"group":"pharma","channel":"default"},{"code":"600938",...,"group":"oil_short","channel":"oil","group_label":"石油板块短线",...}]
 ```
 
-- 配置 `STOCK_PROFILES` 后以其为准；未配置时回退为单股 `STOCK_CODE` 等变量
-- 301201（诚达药业）等无持仓股票可将 `positions` 设为 `[]`
-- 手动推送全部：`python main.py --now`
-- 仅推诚达药业：`python main.py --now --stock-code 301201`
-- GitHub Actions：在 Variables 中配置 `STOCK_PROFILES`（与本地 `.env` 同步），cron-job.org 无需新增任务
+- 配置 `STOCK_PROFILES` 后以其为准；未配置时回退为单股 `STOCK_CODE`
+- 石油四只为沪市 `market=sh`，`positions` 均为 `[]`
+- 手动全部：`python main.py --now`
+- 仅石油组：`python main.py --now --group oil_short`
+- 仅医药组：`python main.py --now --group pharma`
+- 单股：`python main.py --now --stock-code 600938`
+- GitHub Actions：`STOCK_PROFILES` 变量 + Secrets `DINGTALK_WEBHOOK_OIL` / `DINGTALK_SECRET_OIL`；workflow matrix 并行 `pharma` / `oil_short`，cron-job.org 仍 3 次即可
 
 ## 涨跌归因拆解
 
@@ -154,8 +165,10 @@ git push -u origin main
 
 | 类型 | 名称 | 说明 |
 |------|------|------|
-| Secret | `DINGTALK_WEBHOOK` | 钉钉 Webhook（必填） |
+| Secret | `DINGTALK_WEBHOOK` | 钉钉 Webhook（医药默认群，必填） |
 | Secret | `DINGTALK_SECRET` | 加签密钥（可选） |
+| Secret | `DINGTALK_WEBHOOK_OIL` | 石油短线专属群 Webhook |
+| Secret | `DINGTALK_SECRET_OIL` | 石油短线专属群加签密钥 |
 | Secret | `DEEPSEEK_API_KEY` | DeepSeek API Key |
 | Secret | `WEB_SEARCH_API_KEY` | Tavily/Serper Key（涨跌归因联网搜索，可选） |
 | Secret | `POSITIONS` | 持仓 JSON（仅 `--portfolio` 需要，日常推送可留空 `[]`） |

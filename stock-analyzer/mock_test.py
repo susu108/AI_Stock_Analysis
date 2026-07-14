@@ -27,7 +27,7 @@ from price_move_analyzer import (
     BuildRulePriceMoveFallback,
 )
 from scheduler_guard import BuildPushSlotKey
-from stock_profile import ApplyStockProfile, FilterProfilesByCode
+from stock_profile import ApplyStockProfile, FilterProfilesByCode, FilterProfilesByGroup
 
 
 def BuildMockKline(days: int = 60) -> pd.DataFrame:
@@ -470,9 +470,11 @@ def RunMultiStockProfileTest() -> bool:
     try:
         os.environ["STOCK_PROFILES"] = (
             '[{"code":"301075","name":"多瑞生物","market":"sz","themes":["GLP-1"],'
-            '"business":"测试A","positions":[{"account":"A","cost":60,"shares":100}]},'
+            '"business":"测试A","positions":[{"account":"A","cost":60,"shares":100}],'
+            '"channel":"default","group":"pharma"},'
             '{"code":"301201","name":"诚达药业","market":"sz","themes":["CDMO"],'
-            '"business":"测试B","positions":[]}]'
+            '"business":"测试B","positions":[],'
+            '"channel":"default","group":"pharma"}]'
         )
         profiles = config.ResolveStockProfiles()
         parse_ok = (
@@ -480,6 +482,7 @@ def RunMultiStockProfileTest() -> bool:
             and profiles[0].get("code") == "301075"
             and profiles[1].get("code") == "301201"
             and profiles[1].get("positions") == []
+            and profiles[0].get("group") == "pharma"
         )
 
         filtered = FilterProfilesByCode(profiles, "301201")
@@ -508,6 +511,70 @@ def RunMultiStockProfileTest() -> bool:
         config.STOCK_NAME = saved_name
         config.STOCK_THEMES = saved_themes
         config.POSITIONS = saved_positions
+
+
+def RunOilGroupChannelTest() -> bool:
+    """验证石油组沪市 profile、钉钉通道切换与 group 过滤。"""
+    saved_profiles_env = os.environ.get("STOCK_PROFILES")
+    saved_webhook = config.DINGTALK_WEBHOOK
+    saved_secret = config.DINGTALK_SECRET
+    saved_oil_wh = config.DINGTALK_WEBHOOK_OIL
+    saved_oil_sec = config.DINGTALK_SECRET_OIL
+    saved_label = config.STOCK_GROUP_LABEL
+    saved_code = config.STOCK_CODE
+    try:
+        config.DINGTALK_WEBHOOK = "https://hook.default/example"
+        config.DINGTALK_SECRET = "SECdefault"
+        config.DINGTALK_WEBHOOK_OIL = "https://hook.oil/example"
+        config.DINGTALK_SECRET_OIL = "SECoil"
+        os.environ["STOCK_PROFILES"] = (
+            '[{"code":"301075","name":"多瑞生物","market":"sz","themes":["GLP-1"],'
+            '"business":"药","positions":[],"channel":"default","group":"pharma"},'
+            '{"code":"600938","name":"中国海油","market":"sh","themes":["石油","原油"],'
+            '"business":"海上油气","positions":[],"channel":"oil","group":"oil_short",'
+            '"group_label":"石油板块短线"}]'
+        )
+        profiles = config.ResolveStockProfiles()
+        oil = FilterProfilesByGroup(profiles, "oil_short")
+        pharma = FilterProfilesByGroup(profiles, "pharma")
+        group_ok = (
+            len(oil) == 1
+            and oil[0].get("code") == "600938"
+            and oil[0].get("market") == "sh"
+            and len(pharma) == 1
+        )
+
+        webhook, secret = config.ResolveDingtalkChannel("oil")
+        channel_resolve_ok = (
+            webhook == "https://hook.oil/example" and secret == "SECoil"
+        )
+
+        with ApplyStockProfile(oil[0]):
+            switch_ok = (
+                config.STOCK_CODE == "600938"
+                and config.STOCK_MARKET == "sh"
+                and config.DINGTALK_WEBHOOK == "https://hook.oil/example"
+                and config.DINGTALK_SECRET == "SECoil"
+                and config.STOCK_GROUP_LABEL == "石油板块短线"
+            )
+        restore_ok = (
+            config.DINGTALK_WEBHOOK == "https://hook.default/example"
+            and config.DINGTALK_SECRET == "SECdefault"
+            and config.STOCK_GROUP_LABEL == saved_label
+            and config.STOCK_CODE == saved_code
+        )
+        return group_ok and channel_resolve_ok and switch_ok and restore_ok
+    finally:
+        if saved_profiles_env is None:
+            os.environ.pop("STOCK_PROFILES", None)
+        else:
+            os.environ["STOCK_PROFILES"] = saved_profiles_env
+        config.DINGTALK_WEBHOOK = saved_webhook
+        config.DINGTALK_SECRET = saved_secret
+        config.DINGTALK_WEBHOOK_OIL = saved_oil_wh
+        config.DINGTALK_SECRET_OIL = saved_oil_sec
+        config.STOCK_GROUP_LABEL = saved_label
+        config.STOCK_CODE = saved_code
 
 
 def RunThemeMismatchTest() -> bool:
@@ -800,6 +867,9 @@ def RunMockTest() -> None:
     multi_stock_ok = RunMultiStockProfileTest()
     print(f"多股监控 Profile: {'通过' if multi_stock_ok else '失败'}")
 
+    oil_group_ok = RunOilGroupChannelTest()
+    print(f"石油双群通道: {'通过' if oil_group_ok else '失败'}")
+
     news_judge_ok = (
         "资讯研判" in report
         and "个股直接利好" in report
@@ -819,7 +889,7 @@ def RunMockTest() -> None:
         or not compact_ok or not full_mode_ok
         or not kline_merge_ok or not tail_horizon_ok
         or not theme_mismatch_ok or not trading_day_date_ok
-        or not multi_stock_ok or not news_judge_ok
+        or not multi_stock_ok or not oil_group_ok or not news_judge_ok
     ):
         raise SystemExit(1)
 
