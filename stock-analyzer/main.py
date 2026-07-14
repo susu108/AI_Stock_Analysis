@@ -19,6 +19,7 @@ from news_analyzer import AnalyzeNewsImpact
 from news_fetcher import FetchNews, FlattenNewsItems
 from portfolio_advisor import GeneratePortfolioAdvice
 from scheduler_guard import ReleasePushSlot, TryAcquireSchedulerLock, TryClaimPushSlot
+from stock_profile import ApplyStockProfile, FilterProfilesByCode
 from utils import NowStr, SetupLogger
 
 logger = SetupLogger(config.LOG_LEVEL)
@@ -61,6 +62,12 @@ def ParseArgs() -> argparse.Namespace:
         default=None,
         help="指定推送时刻 HH:MM（如 09:00），用于映射开盘前/午盘/尾盘标签",
     )
+    parser.add_argument(
+        "--stock-code",
+        type=str,
+        default=None,
+        help="仅分析并推送指定股票代码（如 301201），默认推送 STOCK_PROFILES 中全部",
+    )
     return parser.parse_args()
 
 
@@ -88,8 +95,30 @@ def Job(
     session_label: str | None = None,
     push_time: str | None = None,
     force_run: bool = False,
+    stock_code: str | None = None,
 ) -> None:
-    """执行一次日常实时分析推送（不含持仓）。"""
+    """执行一次日常实时分析推送（不含持仓），支持多股 profile 循环。"""
+    profiles = FilterProfilesByCode(config.ResolveStockProfiles(), stock_code)
+    if stock_code and not profiles:
+        logger.error("未找到股票代码 %s 的 profile 配置", stock_code)
+        PushErrorNotice(f"未找到股票 {stock_code} 的监控配置")
+        return
+
+    for profile in profiles:
+        with ApplyStockProfile(profile):
+            _JobForCurrentProfile(
+                session_label=session_label,
+                push_time=push_time,
+                force_run=force_run,
+            )
+
+
+def _JobForCurrentProfile(
+    session_label: str | None = None,
+    push_time: str | None = None,
+    force_run: bool = False,
+) -> None:
+    """对当前 config 中的股票执行一次日常分析推送。"""
     label = session_label or GetSessionLabel(push_time)
     run_mode = "手动实时" if force_run else "定时"
     logger.info("=" * 50)
@@ -141,7 +170,9 @@ def Job(
             prediction_horizon=horizon,
         )
 
-        if not force_run and not TryClaimPushSlot(push_time, display_label):
+        if not force_run and not TryClaimPushSlot(
+            push_time, display_label, stock_code=config.STOCK_CODE,
+        ):
             logger.info("本时段推送已由其他实例完成，跳过")
             return
 
@@ -153,16 +184,24 @@ def Job(
         )
 
         if not success and not force_run:
-            ReleasePushSlot(push_time, display_label)
+            ReleasePushSlot(push_time, display_label, stock_code=config.STOCK_CODE)
 
         if success:
-            logger.info("日常分析完成，报告已推送")
+            logger.info(
+                "%s(%s) 日常分析完成，报告已推送",
+                config.STOCK_NAME,
+                config.STOCK_CODE,
+            )
         else:
-            logger.warning("日常分析完成，但钉钉推送未成功")
+            logger.warning(
+                "%s(%s) 日常分析完成，但钉钉推送未成功",
+                config.STOCK_NAME,
+                config.STOCK_CODE,
+            )
 
     except Exception as exc:
-        logger.exception("任务执行异常: %s", exc)
-        PushErrorNotice(f"任务执行异常: {exc}")
+        logger.exception("%s(%s) 任务执行异常: %s", config.STOCK_NAME, config.STOCK_CODE, exc)
+        PushErrorNotice(f"{config.STOCK_NAME}({config.STOCK_CODE}) 任务执行异常: {exc}")
 
     logger.info("=" * 50)
 
@@ -245,26 +284,31 @@ def Main() -> None:
 
     if args.scheduled:
         label = GetSessionLabel(args.push_time)
+        profile_count = len(FilterProfilesByCode(config.ResolveStockProfiles(), args.stock_code))
         logger.info(
-            "股票分析工具 — %s(%s) 模式:外部调度 push_time=%s 时段=%s",
-            config.STOCK_NAME,
-            config.STOCK_CODE,
+            "股票分析工具 — 模式:外部调度 push_time=%s 时段=%s 监控%d只股票",
             args.push_time or "auto",
             label,
+            profile_count,
         )
-        Job(session_label=label, push_time=args.push_time, force_run=False)
+        Job(
+            session_label=label,
+            push_time=args.push_time,
+            force_run=False,
+            stock_code=args.stock_code,
+        )
         return
 
     is_manual = args.now or config.MANUAL_RUN
+    profile_count = len(FilterProfilesByCode(config.ResolveStockProfiles(), args.stock_code))
     logger.info(
-        "股票分析钉钉推送工具启动 — %s(%s) 模式:%s",
-        config.STOCK_NAME,
-        config.STOCK_CODE,
+        "股票分析钉钉推送工具启动 — 模式:%s 监控%d只股票",
         "手动日常" if is_manual else "定时",
+        profile_count,
     )
 
     if is_manual:
-        Job(force_run=True)
+        Job(force_run=True, stock_code=args.stock_code)
         return
 
     if args.local_scheduler or config.ENABLE_LOCAL_SCHEDULER:
@@ -274,6 +318,7 @@ def Main() -> None:
     logger.info(
         "本地定时调度已关闭（方案 A：由 cron-job.org → GitHub Actions 推送）。"
         "手动推送: python main.py --now ｜ "
+        "单股推送: python main.py --now --stock-code 301201 ｜ "
         "如需本地常驻调度: python main.py --local-scheduler 或 .env 设 ENABLE_LOCAL_SCHEDULER=true"
     )
 

@@ -108,23 +108,26 @@ def _PruneExpiredSlots(
 def BuildPushSlotKey(
     push_time: str | None,
     session_label: str,
+    stock_code: str | None = None,
 ) -> str:
     """构建当日推送槽位键（用于去重）。"""
     day = datetime.now().strftime("%Y-%m-%d")
     slot = push_time.strip() if push_time and push_time.strip() else session_label.strip()
-    return f"{day}:{slot}"
+    code = (stock_code or config.STOCK_CODE).strip()
+    return f"{day}:{slot}:{code}"
 
 
 def TryClaimPushSlot(
     push_time: str | None,
     session_label: str,
     ttl_minutes: int = _DEFAULT_PUSH_TTL_MINUTES,
+    stock_code: str | None = None,
 ) -> bool:
     """
     尝试认领推送槽位。
     同一自然日、同一 push_time/时段 在 ttl 内仅允许推送一次。
     """
-    slot_key = BuildPushSlotKey(push_time, session_label)
+    slot_key = BuildPushSlotKey(push_time, session_label, stock_code)
     try:
         with _OpenLockFile(_PUSH_DEDUP_PATH) as fd:
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -148,9 +151,10 @@ def TryClaimPushSlot(
 def ReleasePushSlot(
     push_time: str | None,
     session_label: str,
+    stock_code: str | None = None,
 ) -> None:
     """推送失败时释放槽位，便于重试。"""
-    slot_key = BuildPushSlotKey(push_time, session_label)
+    slot_key = BuildPushSlotKey(push_time, session_label, stock_code)
     try:
         with _OpenLockFile(_PUSH_DEDUP_PATH) as fd:
             fcntl.flock(fd, fcntl.LOCK_EX)

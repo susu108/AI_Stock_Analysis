@@ -20,6 +20,16 @@ def GetNextTradingDay(from_date: date | None = None) -> date:
     raise RuntimeError("无法在 366 天内找到下一交易日")
 
 
+def GetPreviousTradingDay(from_date: date | None = None) -> date:
+    """返回 from_date 之前的上一 A 股交易日（不含 from_date 本身）。"""
+    cursor = (from_date or date.today()) - timedelta(days=1)
+    for _ in range(366):
+        if IsTradingDay(cursor):
+            return cursor
+        cursor -= timedelta(days=1)
+    raise RuntimeError("无法在 366 天内找到上一交易日")
+
+
 def FormatTradingDayLabel(trading_day: date) -> str:
     """格式化交易日标签，如 7月13日（周一）。"""
     weekday = _WEEKDAY_CN[trading_day.weekday()]

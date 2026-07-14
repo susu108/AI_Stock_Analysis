@@ -35,7 +35,7 @@ permissions:
 jobs:
   push-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: stock-analyzer
@@ -70,6 +70,7 @@ jobs:
           WEB_SEARCH_API_KEY: ${{ secrets.WEB_SEARCH_API_KEY }}
           STOCK_THEMES: ${{ vars.STOCK_THEMES }}
           STOCK_BUSINESS: ${{ vars.STOCK_BUSINESS }}
+          STOCK_PROFILES: ${{ vars.STOCK_PROFILES }}
           DINGTALK_REPORT_MODE: ${{ vars.DINGTALK_REPORT_MODE }}
         run: |
           cat > .env << EOF
@@ -93,6 +94,7 @@ jobs:
           WEB_SEARCH_API_KEY=${WEB_SEARCH_API_KEY}
           STOCK_THEMES=${STOCK_THEMES:-GLP-1,司美格鲁肽,多肽原料药}
           STOCK_BUSINESS=${STOCK_BUSINESS:-}
+          STOCK_PROFILES=${STOCK_PROFILES:-}
           DINGTALK_REPORT_MODE=${DINGTALK_REPORT_MODE:-compact}
           PRICE_MOVE_MIN_PCT=2.0
           REPORT_WEB_ENABLED=false

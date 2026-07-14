@@ -36,11 +36,26 @@ python main.py --portfolio
 | `WEB_SEARCH_PROVIDER` | 搜索 Provider：`tavily` / `serper` | tavily |
 | `WEB_SEARCH_API_KEY` | Tavily 或 Serper API Key | 可选 |
 | `STOCK_THEMES` | 个股题材词（逗号分隔，用于搜索） | 空 |
+| `STOCK_PROFILES` | 多股监控 JSON 数组（配置后优先于单股 `STOCK_*`） | 见 .env.example |
 | `PRICE_MOVE_MIN_PCT` | 涨跌幅低于该值输出简版归因 | 2.0 |
 | `REPORT_WEB_ENABLED` | 是否生成网页详细报告并在钉钉附链接 | true |
 | `REPORT_WEB_BASE_URL` | GitHub Pages 报告根 URL | 空 |
 | `REPORT_WEB_OUTPUT_DIR` | HTML 输出目录（相对仓库根） | docs/reports |
 | `REPORT_WEB_RETENTION` | 保留历史报告份数 | 30 |
+
+## 多股监控
+
+通过 `STOCK_PROFILES` 可同时监控多只股票，每只股票使用相同的分析模型（行情/资讯/LLM/涨跌归因），在同一钉钉群**各推送一条**独立报告。
+
+```env
+STOCK_PROFILES=[{"code":"301075","name":"多瑞生物",...,"positions":[...]},{"code":"301201","name":"诚达药业",...,"positions":[]}]
+```
+
+- 配置 `STOCK_PROFILES` 后以其为准；未配置时回退为单股 `STOCK_CODE` 等变量
+- 301201（诚达药业）等无持仓股票可将 `positions` 设为 `[]`
+- 手动推送全部：`python main.py --now`
+- 仅推诚达药业：`python main.py --now --stock-code 301201`
+- GitHub Actions：在 Variables 中配置 `STOCK_PROFILES`（与本地 `.env` 同步），cron-job.org 无需新增任务
 
 ## 涨跌归因拆解
 
@@ -148,6 +163,7 @@ git push -u origin main
 | Variable | `STOCK_NAME` | 可选，默认 多瑞生物 |
 | Variable | `STOCK_THEMES` | 可选，如 `GLP-1,司美格鲁肽,多肽原料药` |
 | Variable | `STOCK_BUSINESS` | 可选，公司主业简述（题材错配判断） |
+| Variable | `STOCK_PROFILES` | 可选，多股监控 JSON（含 301075 + 301201 等） |
 | Variable | `DINGTALK_REPORT_MODE` | 可选，`compact`（默认）或 `full` |
 | Variable | `WEB_SEARCH_ENABLED` | 可选，`true` 启用联网搜索 |
 | Variable | `REPORT_WEB_ENABLED` | 已停用，保持 `false` |

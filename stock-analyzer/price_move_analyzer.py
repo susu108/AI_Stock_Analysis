@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from typing import Any
 
 import requests
 
 import config
 from llm_advisor import IsLlmEnabled
-from utils import SetupLogger
+from utils import IsTradingDay, SetupLogger
 
 logger = SetupLogger(config.LOG_LEVEL)
 
@@ -21,6 +22,88 @@ _DEFAULT_DISCLAIMER = (
     "风险提示：仅行情逻辑复盘，不构成任何投资建议。"
     "归因基于已采集资讯与行情数据，可能存在信息滞后或证据不足。"
 )
+_TODAY_KEEP_SUFFIXES = ("高", "低", "开", "收", "量", "价", "预测", "下午", "上午", "盘")
+
+
+def _FormatNewsTimePrefix(time_str: str) -> str:
+    """资讯时间前缀，供 prompt 引用。"""
+    text = str(time_str or "").strip()
+    if not text:
+        return ""
+    return f"[{text}] "
+
+
+def _FormatNewsLineForPrompt(
+    item: dict[str, Any],
+    tag: str,
+    *,
+    include_reason: bool = True,
+) -> str:
+    """格式化单条资讯行（含发布时间）。"""
+    time_prefix = _FormatNewsTimePrefix(str(item.get("time", "")))
+    title = str(item.get("title", ""))
+    if include_reason:
+        reason = str(item.get("impact_reason", "")).strip()
+        if reason:
+            return f"- {tag} {time_prefix}{title} — {reason}"
+    return f"- {tag} {time_prefix}{title}"
+
+
+def _NormalizeTemporalReferences(text: str, move_context: dict[str, Any]) -> str:
+    """将 LLM 输出中的模糊「昨日/今日」替换为具体交易日标签。"""
+    if not text:
+        return text
+
+    prev_label = str(move_context.get("prev_trading_date_label", "")).strip()
+    move_label = str(move_context.get("move_date_label", "")).strip()
+    move_date_str = str(move_context.get("move_date", "")).strip()
+
+    result = text
+    if prev_label and "昨日" in result:
+        result = result.replace("昨日", f"上一交易日（{prev_label}）")
+
+    if (
+        move_label
+        and move_date_str
+        and IsTradingDay(date.fromisoformat(move_date_str))
+        and "今日" in result
+    ):
+        for suffix in _TODAY_KEEP_SUFFIXES:
+            result = result.replace(f"今日{suffix}", f"__KEEP_TODAY_{suffix}__")
+        result = result.replace("今日", move_label)
+        for suffix in _TODAY_KEEP_SUFFIXES:
+            result = result.replace(f"__KEEP_TODAY_{suffix}__", f"今日{suffix}")
+
+    return result
+
+
+def _ApplyTemporalNormalization(
+    result: dict[str, Any],
+    move_context: dict[str, Any],
+) -> dict[str, Any]:
+    """对涨跌归因各维度要点做时间表述规范化。"""
+    dims = result.get("dimensions")
+    if not isinstance(dims, list):
+        return result
+
+    for dim in dims:
+        if not isinstance(dim, dict):
+            continue
+        points = dim.get("points")
+        if not isinstance(points, list):
+            continue
+        for pt in points:
+            if not isinstance(pt, dict):
+                continue
+            for field in ("content", "evidence", "subtitle"):
+                raw = str(pt.get(field, ""))
+                if raw:
+                    pt[field] = _NormalizeTemporalReferences(raw, move_context)
+
+    headline = str(result.get("headline", "")).strip()
+    if headline:
+        result["headline"] = _NormalizeTemporalReferences(headline, move_context)
+    return result
 
 
 def ShouldSkipFullAnalysis(move_context: dict[str, Any]) -> bool:
@@ -38,15 +121,26 @@ def ShouldSkipFullAnalysis(move_context: dict[str, Any]) -> bool:
 def BuildMoveContextPrompt(move_context: dict[str, Any]) -> str:
     """将结构化上下文序列化为 LLM 输入。"""
     overlap = move_context.get("sector_theme_overlap") or {}
+    move_date = move_context.get("move_date", "")
+    move_date_label = move_context.get("move_date_label", "")
+    prev_label = move_context.get("prev_trading_date_label", "上一交易日")
+    prev_pct = float(
+        move_context.get("prev_trading_change_pct", move_context.get("prev_day_change_pct", 0))
+        or 0
+    )
+    date_line = f"日期：{move_date}"
+    if move_date_label:
+        date_line += f"（{move_date_label}）"
+
     lines = [
         f"目标：{move_context.get('stock_name')}({move_context.get('stock_code')})",
-        f"日期：{move_context.get('move_date')}",
+        date_line,
         f"涨跌：{move_context.get('move_direction')} {move_context.get('change_pct'):+.2f}%"
         f"（{move_context.get('change_amt'):+.2f}元）",
         f"现价：{move_context.get('price')} 昨收：{move_context.get('prev_close')}",
         f"成交额：{move_context.get('amount_text')} 量比：{move_context.get('volume_ratio'):.2f}",
         f"流通市值：{move_context.get('circ_mv_yi')}亿（{move_context.get('mv_tier')}）",
-        f"昨日涨跌：{move_context.get('prev_day_change_pct'):+.2f}%",
+        f"上一交易日（{prev_label}）涨跌：{prev_pct:+.2f}%",
         f"箱体叙事：{move_context.get('box_break_narrative')}",
         f"主力净流入：{move_context.get('main_net_inflow'):.0f}元",
         f"融资余额变动：{move_context.get('margin_balance_change'):.0f}元",
@@ -58,6 +152,16 @@ def BuildMoveContextPrompt(move_context: dict[str, Any]) -> str:
         f"概念题材重叠度：{overlap.get('overlap_level', '未知')}；"
         f"个股相对概念均值偏离：{move_context.get('stock_vs_sector_divergence', 0):+.2f}%"
     )
+
+    recent_days = move_context.get("recent_trading_days") or []
+    if recent_days:
+        lines.extend(["", "【近5个交易日涨跌】"])
+        for bar in recent_days:
+            lines.append(
+                f"- {bar.get('date_label', bar.get('date', ''))}："
+                f"{float(bar.get('change_pct', 0) or 0):+.2f}%"
+            )
+
     lines.extend(["", "【板块领涨】"])
     for leader in move_context.get("sector_leaders") or []:
         lines.append(
@@ -77,19 +181,17 @@ def BuildMoveContextPrompt(move_context: dict[str, Any]) -> str:
 
     lines.extend(["", "【个股直接催化资讯 — directness=direct】"])
     for item in move_context.get("impactful_news") or []:
-        lines.append(
-            f"- [{item.get('category')}|{item.get('impact')}|direct] {item.get('title')} "
-            f"— {item.get('impact_reason')}"
-        )
+        tag = f"[{item.get('category')}|{item.get('impact')}|direct]"
+        lines.append(_FormatNewsLineForPrompt(item, tag))
     if not (move_context.get("impactful_news") or []):
         lines.append("- 无直接催化资讯")
 
     lines.extend(["", "【板块背景/题材错配 — 不得等同个股利好】"])
     for item in move_context.get("background_news") or []:
-        lines.append(
-            f"- [{item.get('category')}|{item.get('directness')}|{item.get('impact')}] "
-            f"{item.get('title')} — {item.get('impact_reason')}"
+        tag = (
+            f"[{item.get('category')}|{item.get('directness')}|{item.get('impact')}]"
         )
+        lines.append(_FormatNewsLineForPrompt(item, tag))
     if not (move_context.get("background_news") or []):
         lines.append("- 无板块背景/错配资讯")
 
@@ -101,11 +203,16 @@ def BuildMoveContextPrompt(move_context: dict[str, Any]) -> str:
     if other_news:
         lines.extend(["", "【其他相关资讯】"])
         for item in other_news:
-            lines.append(f"- [{item.get('category')}] {item.get('title')}")
+            lines.append(
+                _FormatNewsLineForPrompt(item, f"[{item.get('category')}]", include_reason=False)
+            )
 
     lines.extend(["", "【联网搜索】"])
     for item in move_context.get("web_search_hits") or []:
-        lines.append(f"- {item.get('title')} | {item.get('source')} | {item.get('url')}")
+        time_prefix = _FormatNewsTimePrefix(str(item.get("time", "")))
+        lines.append(
+            f"- {time_prefix}{item.get('title')} | {item.get('source')} | {item.get('url')}"
+        )
         snippet = item.get("content", "")
         if snippet:
             lines.append(f"  {snippet[:200]}")
@@ -143,7 +250,11 @@ def _BuildPriceMoveSystemPrompt() -> str:
         "6. 【板块背景/题材错配】资讯只可写入 sector 维，不得写入 catalyst 作为个股利好；"
         "7. risks 维分析利好兑现、套牢区、杠杆抛压、题材错配等后续隐患；"
         "8. 涨跌幅为负时重点分析下跌原因；"
-        "9. 仅输出 JSON。"
+        "9. 禁止单独使用「昨日」「今日」「前日」描述行情或资讯；"
+        "必须写 YYYY-MM-DD 或 M月D日（周X），引用大涨/大跌须对应【近5个交易日涨跌】中的具体日期；"
+        "跨周末/节假日时上一交易日不等于自然日昨天；"
+        "10. 引用资讯须在 content/evidence 中附带发布时间（来自上下文 time 字段）；"
+        "11. 仅输出 JSON。"
     )
 
 
@@ -257,16 +368,29 @@ def _EnsureAllDimensions(dims: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def _FormatNewsContentWithTime(item: dict[str, Any]) -> str:
+    """规则兜底：资讯内容带发布时间。"""
+    time_prefix = _FormatNewsTimePrefix(str(item.get("time", "")))
+    title = str(item.get("title", ""))
+    body = str(item.get("impact_reason") or item.get("content", "")[:80])
+    return f"{time_prefix}{title} — {body}"
+
+
 def BuildRulePriceMoveFallback(move_context: dict[str, Any]) -> dict[str, Any]:
     """LLM 不可用时的规则兜底归因。"""
     direction = str(move_context.get("move_direction", "平"))
     change_pct = float(move_context.get("change_pct", 0) or 0)
+    prev_label = str(move_context.get("prev_trading_date_label", "")).strip()
+    prev_pct = float(
+        move_context.get("prev_trading_change_pct", move_context.get("prev_day_change_pct", 0))
+        or 0
+    )
     points_catalyst: list[dict[str, str]] = []
     for item in move_context.get("impactful_news") or []:
         points_catalyst.append({
             "subtitle": str(item.get("category", "资讯")),
-            "content": f"{item.get('title')} — {item.get('impact_reason') or item.get('content', '')[:80]}",
-            "evidence": item.get("title", ""),
+            "content": _FormatNewsContentWithTime(item),
+            "evidence": f"{item.get('time', '')} {item.get('title', '')}".strip(),
             "source_url": item.get("url", ""),
         })
     if not points_catalyst:
@@ -300,8 +424,8 @@ def BuildRulePriceMoveFallback(move_context: dict[str, Any]) -> dict[str, Any]:
         label = "题材错配" if directness == "mismatch" else "板块背景"
         sector_points.append({
             "subtitle": label,
-            "content": f"{item.get('title')} — {item.get('impact_reason') or item.get('content', '')[:80]}",
-            "evidence": item.get("title", ""),
+            "content": _FormatNewsContentWithTime(item),
+            "evidence": f"{item.get('time', '')} {item.get('title', '')}".strip(),
             "source_url": item.get("url", ""),
         })
 
@@ -347,6 +471,17 @@ def BuildRulePriceMoveFallback(move_context: dict[str, Any]) -> dict[str, Any]:
         "evidence": "A股常见题材节奏",
         "source_url": "",
     }]
+    if prev_label and abs(prev_pct) >= 3:
+        move_word = "大涨" if prev_pct > 0 else "大跌"
+        risk_points.append({
+            "subtitle": "利好兑现",
+            "content": (
+                f"{prev_label}{move_word} {abs(prev_pct):.2f}%，"
+                f"可能已提前反映部分预期，需警惕获利了结"
+            ),
+            "evidence": f"近5个交易日涨跌 {prev_label}",
+            "source_url": "",
+        })
     mismatch_items = [
         i for i in (move_context.get("background_news") or [])
         if str(i.get("directness", "")) == "mismatch"
@@ -390,7 +525,7 @@ def BuildRulePriceMoveFallback(move_context: dict[str, Any]) -> dict[str, Any]:
     else:
         headline += "，技术/资金因素为主"
 
-    return {
+    return _ApplyTemporalNormalization({
         "move_date": move_context.get("move_date", ""),
         "move_direction": direction,
         "move_pct": change_pct,
@@ -407,7 +542,7 @@ def BuildRulePriceMoveFallback(move_context: dict[str, Any]) -> dict[str, Any]:
         "evidence_gaps": evidence_gaps,
         "source": "rule_fallback",
         "brief": ShouldSkipFullAnalysis(move_context),
-    }
+    }, move_context)
 
 
 def BuildBriefPriceMove(move_context: dict[str, Any]) -> dict[str, Any]:
@@ -455,7 +590,7 @@ def AnalyzePriceMove(move_context: dict[str, Any]) -> dict[str, Any]:
     if isinstance(gaps_raw, list):
         evidence_gaps = [str(g).strip() for g in gaps_raw if str(g).strip()]
 
-    result: dict[str, Any] = {
+    result: dict[str, Any] = _ApplyTemporalNormalization({
         "move_date": str(llm_result.get("move_date", move_context.get("move_date", ""))),
         "move_direction": direction,
         "move_pct": float(llm_result.get("move_pct", move_context.get("change_pct", 0)) or 0),
@@ -466,7 +601,7 @@ def AnalyzePriceMove(move_context: dict[str, Any]) -> dict[str, Any]:
         "evidence_gaps": evidence_gaps,
         "source": "llm",
         "brief": False,
-    }
+    }, move_context)
     logger.info(
         "涨跌归因完成 — 主因:%s 五维:%d evidence_gaps:%d",
         primary,

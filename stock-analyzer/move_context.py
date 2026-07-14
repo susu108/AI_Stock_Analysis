@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
 
 import config
+from market_context import FormatTradingDayLabel
 from news_analyzer import GetBackgroundNewsItems, GetImpactfulItems
 from news_context import ComputeSectorThemeOverlap, ComputeStockVsSectorDivergence
 from price_context import CalcPriceAnchors, ExtractRecentPriceLevels
@@ -27,8 +28,67 @@ def ClassifyMarketCapTier(circ_mv: float) -> str:
     return "大盘（>100亿）"
 
 
+def _KlineDateStr(row_date: Any) -> str:
+    """将 K 线日期列统一为 YYYY-MM-DD 字符串。"""
+    if hasattr(row_date, "strftime"):
+        return row_date.strftime("%Y-%m-%d")
+    text = str(row_date).strip()[:10]
+    return text.replace("/", "-")
+
+
+def _ParseKlineDate(row_date: Any) -> date | None:
+    """解析 K 线日期为 date 对象。"""
+    text = _KlineDateStr(row_date)
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _CalcBarChangePct(kline: pd.DataFrame, index: int) -> float:
+    """计算 K 线指定行的涨跌幅。"""
+    pct_col = "涨跌幅" if "涨跌幅" in kline.columns else None
+    if pct_col:
+        return SafeFloat(kline[pct_col].iloc[index])
+    close_col = "收盘" if "收盘" in kline.columns else "close"
+    closes = kline[close_col].astype(float)
+    if index <= 0:
+        return 0.0
+    prev = closes.iloc[index - 1]
+    if prev <= 0:
+        return 0.0
+    return round((closes.iloc[index] - prev) / prev * 100, 2)
+
+
+def ExtractRecentTradingDayBars(
+    kline: pd.DataFrame | None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """从 K 线提取最近 N 个交易日的日期与涨跌幅。"""
+    if kline is None or kline.empty:
+        return []
+    date_col = next((c for c in kline.columns if "日期" in str(c)), None)
+    if date_col is None:
+        return []
+
+    bars: list[dict[str, Any]] = []
+    start = max(0, len(kline) - limit)
+    for idx in range(start, len(kline)):
+        trading_day = _ParseKlineDate(kline[date_col].iloc[idx])
+        if trading_day is None:
+            continue
+        bars.append({
+            "date": trading_day.isoformat(),
+            "date_label": FormatTradingDayLabel(trading_day),
+            "change_pct": _CalcBarChangePct(kline, idx),
+        })
+    return bars
+
+
 def CalcPrevDayChangePct(kline: pd.DataFrame | None) -> float:
-    """计算昨日涨跌幅。"""
+    """计算上一交易日涨跌幅（K 线倒数第二根）。"""
     if kline is None or kline.empty or len(kline) < 2:
         return 0.0
     pct_col = "涨跌幅" if "涨跌幅" in kline.columns else None
@@ -46,18 +106,22 @@ def BuildBoxBreakNarrative(
     price: float,
     levels: dict[str, float],
     anchors: dict[str, float],
+    prev_trading_date_label: str = "",
 ) -> str:
     """生成箱体破位/压力转换叙事。"""
     box_low = anchors.get("box_low", 0.0)
     box_high = anchors.get("box_high", 0.0)
     prev_low = levels.get("prev_day_low", 0.0)
     today_open = levels.get("today_open", price)
+    prev_label = prev_trading_date_label or "上一交易日"
     parts: list[str] = []
 
     if box_low > 0 and box_high > box_low:
         parts.append(f"近10日箱体 {box_low:.2f}~{box_high:.2f} 元")
         if prev_low > 0 and prev_low < box_low:
-            parts.append(f"前一日最低 {prev_low:.2f} 元跌破箱体下沿，短线抛压释放")
+            parts.append(
+                f"{prev_label}最低 {prev_low:.2f} 元跌破箱体下沿，短线抛压释放"
+            )
         if price > box_high:
             parts.append(f"现价 {price:.2f} 元放量突破箱体上沿，原压力或转支撑")
         elif price < box_low:
@@ -115,6 +179,7 @@ def FormatNewsForContext(items: list[dict[str, Any]], limit: int = 8) -> list[di
             "impact_reason": str(item.get("impact_reason", "")),
             "source": str(item.get("source", "")),
             "url": str(item.get("url", "")),
+            "time": str(item.get("time", "")),
         })
     return formatted
 
@@ -142,6 +207,19 @@ def BuildMoveContext(
     levels = ExtractRecentPriceLevels(kline, rt)
     anchors = CalcPriceAnchors(kline, rt, indicators, price)
     prev_day_change = CalcPrevDayChangePct(kline)
+    recent_trading_days = ExtractRecentTradingDayBars(kline, limit=5)
+
+    move_day = date.today()
+    move_date_label = FormatTradingDayLabel(move_day)
+    prev_trading_date = ""
+    prev_trading_date_label = ""
+    if len(recent_trading_days) >= 2:
+        prev_bar = recent_trading_days[-2]
+        prev_trading_date = str(prev_bar.get("date", ""))
+        prev_trading_date_label = str(prev_bar.get("date_label", ""))
+    elif len(recent_trading_days) == 1:
+        prev_trading_date = str(recent_trading_days[0].get("date", ""))
+        prev_trading_date_label = str(recent_trading_days[0].get("date_label", ""))
 
     margin = data.get("margin") or {}
     margin_change = SafeFloat(margin.get("margin_balance_change"))
@@ -168,7 +246,8 @@ def BuildMoveContext(
         "stock_business": config.STOCK_BUSINESS,
         "sector_theme_overlap": overlap,
         "stock_vs_sector_divergence": divergence,
-        "move_date": date.today().isoformat(),
+        "move_date": move_day.isoformat(),
+        "move_date_label": move_date_label,
         "move_direction": move_direction,
         "change_pct": change_pct,
         "change_amt": change_amt,
@@ -178,6 +257,10 @@ def BuildMoveContext(
         "amount_text": FormatAmount(amount),
         "volume_ratio": volume_ratio,
         "prev_day_change_pct": prev_day_change,
+        "prev_trading_date": prev_trading_date,
+        "prev_trading_date_label": prev_trading_date_label,
+        "prev_trading_change_pct": prev_day_change,
+        "recent_trading_days": recent_trading_days,
         "prev_day_low": levels.get("prev_day_low", 0.0),
         "today_low": levels.get("today_low", 0.0),
         "today_high": levels.get("today_high", 0.0),
@@ -189,7 +272,9 @@ def BuildMoveContext(
         "box_low": anchors.get("box_low", 0.0),
         "box_high": anchors.get("box_high", 0.0),
         "box_mid": anchors.get("box_mid", 0.0),
-        "box_break_narrative": BuildBoxBreakNarrative(price, levels, anchors),
+        "box_break_narrative": BuildBoxBreakNarrative(
+            price, levels, anchors, prev_trading_date_label,
+        ),
         "sector_leaders": ExtractSectorLeaders(data),
         "sector_snapshot": list(bundle.get("sector_snapshot") or []),
         "main_net_inflow": ExtractMainNetInflow(data.get("fund_flow")),

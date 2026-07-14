@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import config
 from datetime import date, datetime
 from typing import Any
@@ -18,7 +20,14 @@ from dingtalk_pusher import (
     ResolveTradeDisplayLevels,
 )
 from market_context import ResolvePredictionHorizon, ResolveSessionAndHorizon
+from move_context import BuildMoveContext
 from news_analyzer import AnalyzeNewsImpact, CalcNewsScore, GetBackgroundNewsItems
+from price_move_analyzer import (
+    BuildMoveContextPrompt,
+    BuildRulePriceMoveFallback,
+)
+from scheduler_guard import BuildPushSlotKey
+from stock_profile import ApplyStockProfile, FilterProfilesByCode
 
 
 def BuildMockKline(days: int = 60) -> pd.DataFrame:
@@ -366,6 +375,141 @@ def RunTailHorizonTest() -> bool:
     )
 
 
+def BuildMondayScenarioKline() -> pd.DataFrame:
+    """构造周一盘中 K 线：上一交易日为周五 7/10 大涨 8.10%。"""
+    return pd.DataFrame({
+        "日期": ["2026-07-08", "2026-07-09", "2026-07-10", "2026-07-13"],
+        "开盘": [54.0, 55.0, 56.5, 61.0],
+        "收盘": [55.0, 56.0, 61.67, 60.15],
+        "最高": [55.5, 56.5, 62.0, 61.5],
+        "最低": [53.5, 54.5, 56.0, 59.8],
+        "成交量": [200000.0, 220000.0, 350000.0, 280000.0],
+        "成交额": [1.1e7, 1.2e7, 2.1e7, 1.7e7],
+        "涨跌幅": [1.2, 1.8, 8.10, -2.46],
+        "涨跌额": [0.65, 0.98, 4.61, -1.52],
+        "换手率": [3.0, 3.2, 5.1, 4.0],
+    })
+
+
+def RunTradingDayDateLabelTest() -> bool:
+    """验证周一运行时上一交易日标注为周五 7/10，且 prompt 不含裸「昨日涨跌」。"""
+    saved_llm = config.LLM_ENABLED
+    saved_min_pct = config.PRICE_MOVE_MIN_PCT
+    try:
+        config.LLM_ENABLED = False
+        config.PRICE_MOVE_MIN_PCT = 0.5
+
+        kline = BuildMondayScenarioKline()
+        data: dict[str, Any] = {
+            "realtime": {
+                "price": 60.15,
+                "change_pct": -2.46,
+                "change_amt": -1.52,
+                "prev_close": 61.67,
+                "open": 61.0,
+                "high": 61.5,
+                "low": 59.8,
+                "amount": 170000000,
+                "volume_ratio": 1.2,
+                "circ_mv": 6.8e9,
+            },
+            "kline": kline,
+            "concept": BuildMockConceptBoards(),
+            "industry": BuildMockIndustryBoards(),
+            "fund_flow": BuildMockFundFlow(),
+        }
+        news_bundle = AnalyzeNewsImpact(BuildMockNews(), data)
+        analysis = AnalyzeAll(data)
+        analysis = MergeNewsIntoAnalysis(analysis, news_bundle)
+
+        move_ctx = BuildMoveContext(data, analysis, news_bundle)
+        ctx_ok = (
+            move_ctx.get("prev_trading_date") == "2026-07-10"
+            and "周五" in str(move_ctx.get("prev_trading_date_label", ""))
+            and abs(float(move_ctx.get("prev_trading_change_pct", 0) or 0) - 8.10) < 0.01
+            and len(move_ctx.get("recent_trading_days") or []) >= 2
+        )
+
+        prompt = BuildMoveContextPrompt(move_ctx)
+        prompt_ok = (
+            "7月10日" in prompt
+            and "昨日涨跌" not in prompt
+            and "上一交易日" in prompt
+            and "2026-07-10" in prompt
+        )
+
+        fallback = BuildRulePriceMoveFallback(move_ctx)
+        risks_dim = next(
+            (d for d in (fallback.get("dimensions") or []) if d.get("id") == "risks"),
+            {},
+        )
+        risk_text = " ".join(
+            str(p.get("content", "")) for p in (risks_dim.get("points") or [])
+        )
+        fallback_ok = "7月10日" in risk_text and "8.10" in risk_text
+
+        news_time_ok = any(
+            str(item.get("time", "")).startswith("2026-07-10")
+            for item in (move_ctx.get("impactful_news") or [])
+            + (move_ctx.get("background_news") or [])
+        ) and "2026-07-10" in prompt
+
+        return ctx_ok and prompt_ok and fallback_ok and news_time_ok
+    finally:
+        config.LLM_ENABLED = saved_llm
+        config.PRICE_MOVE_MIN_PCT = saved_min_pct
+
+
+def RunMultiStockProfileTest() -> bool:
+    """验证多股 STOCK_PROFILES 解析、profile 切换与推送槽位隔离。"""
+    saved_profiles_env = os.environ.get("STOCK_PROFILES")
+    saved_code = config.STOCK_CODE
+    saved_name = config.STOCK_NAME
+    saved_themes = list(config.STOCK_THEMES)
+    saved_positions = list(config.POSITIONS)
+    try:
+        os.environ["STOCK_PROFILES"] = (
+            '[{"code":"301075","name":"多瑞生物","market":"sz","themes":["GLP-1"],'
+            '"business":"测试A","positions":[{"account":"A","cost":60,"shares":100}]},'
+            '{"code":"301201","name":"诚达药业","market":"sz","themes":["CDMO"],'
+            '"business":"测试B","positions":[]}]'
+        )
+        profiles = config.ResolveStockProfiles()
+        parse_ok = (
+            len(profiles) == 2
+            and profiles[0].get("code") == "301075"
+            and profiles[1].get("code") == "301201"
+            and profiles[1].get("positions") == []
+        )
+
+        filtered = FilterProfilesByCode(profiles, "301201")
+        filter_ok = len(filtered) == 1 and filtered[0].get("name") == "诚达药业"
+
+        with ApplyStockProfile(profiles[1]):
+            switch_ok = (
+                config.STOCK_CODE == "301201"
+                and config.STOCK_NAME == "诚达药业"
+                and config.STOCK_THEMES == ["CDMO"]
+                and config.POSITIONS == []
+            )
+        restore_ok = config.STOCK_CODE == saved_code and config.STOCK_NAME == saved_name
+
+        key_a = BuildPushSlotKey("09:00", "开盘前", stock_code="301075")
+        key_b = BuildPushSlotKey("09:00", "开盘前", stock_code="301201")
+        slot_ok = key_a != key_b and key_a.endswith(":301075") and key_b.endswith(":301201")
+
+        return parse_ok and filter_ok and switch_ok and restore_ok and slot_ok
+    finally:
+        if saved_profiles_env is None:
+            os.environ.pop("STOCK_PROFILES", None)
+        else:
+            os.environ["STOCK_PROFILES"] = saved_profiles_env
+        config.STOCK_CODE = saved_code
+        config.STOCK_NAME = saved_name
+        config.STOCK_THEMES = saved_themes
+        config.POSITIONS = saved_positions
+
+
 def RunThemeMismatchTest() -> bool:
     """验证板块/政策 GLP-1 资讯不会被误标为个股利好。"""
     saved_themes = list(config.STOCK_THEMES)
@@ -650,6 +794,12 @@ def RunMockTest() -> None:
     theme_mismatch_ok = RunThemeMismatchTest()
     print(f"题材错配分层: {'通过' if theme_mismatch_ok else '失败'}")
 
+    trading_day_date_ok = RunTradingDayDateLabelTest()
+    print(f"涨跌归因日期标注: {'通过' if trading_day_date_ok else '失败'}")
+
+    multi_stock_ok = RunMultiStockProfileTest()
+    print(f"多股监控 Profile: {'通过' if multi_stock_ok else '失败'}")
+
     news_judge_ok = (
         "资讯研判" in report
         and "个股直接利好" in report
@@ -668,7 +818,8 @@ def RunMockTest() -> None:
         or not sat_ok or not fri_ok or not sat_dingtalk_ok
         or not compact_ok or not full_mode_ok
         or not kline_merge_ok or not tail_horizon_ok
-        or not theme_mismatch_ok or not news_judge_ok
+        or not theme_mismatch_ok or not trading_day_date_ok
+        or not multi_stock_ok or not news_judge_ok
     ):
         raise SystemExit(1)
 

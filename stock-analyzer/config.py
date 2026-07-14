@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -70,6 +71,63 @@ def _ParseReportMode(raw: str | None) -> str:
     return "compact"
 
 
+def _ParseThemesField(raw: Any) -> list[str]:
+    """解析 profile 中的 themes 字段（数组或逗号分隔字符串）。"""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(t).strip() for t in raw if str(t).strip()]
+    if isinstance(raw, str):
+        return _ParseCsvList(raw)
+    return []
+
+
+def _NormalizeStockProfile(item: dict[str, Any]) -> dict[str, Any] | None:
+    """校验并规范化单条股票 profile。"""
+    code = str(item.get("code", "")).strip()
+    name = str(item.get("name", "")).strip()
+    if not code or not name:
+        return None
+    market = str(item.get("market", "sz")).strip() or "sz"
+    themes = _ParseThemesField(item.get("themes"))
+    business = str(item.get("business", "")).strip()
+    positions_raw = item.get("positions")
+    if positions_raw is None:
+        positions: list[dict[str, float | int]] = []
+    elif isinstance(positions_raw, list):
+        positions = positions_raw
+    else:
+        positions = []
+    return {
+        "code": code,
+        "name": name,
+        "market": market,
+        "themes": themes,
+        "business": business,
+        "positions": positions,
+    }
+
+
+def _ParseStockProfiles(raw: str | None) -> list[dict[str, Any]]:
+    """解析 STOCK_PROFILES JSON 数组。"""
+    if raw is None or raw.strip() == "":
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    profiles: list[dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        normalized = _NormalizeStockProfile(item)
+        if normalized is not None:
+            profiles.append(normalized)
+    return profiles
+
+
 DINGTALK_WEBHOOK: str = os.getenv("DINGTALK_WEBHOOK", "")
 DINGTALK_SECRET: str = os.getenv("DINGTALK_SECRET", "")
 STOCK_CODE: str = os.getenv("STOCK_CODE", "301075")
@@ -118,6 +176,21 @@ REPORT_WEB_RETENTION: int = _ParseInt(os.getenv("REPORT_WEB_RETENTION"), 30)
 REPORT_WEB_LOCAL_HINT: bool = _ParseBool(os.getenv("REPORT_WEB_LOCAL_HINT"), True)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def ResolveStockProfiles() -> list[dict[str, Any]]:
+    """解析监控股票列表；未配置 STOCK_PROFILES 时回退为单股配置。"""
+    profiles = _ParseStockProfiles(os.getenv("STOCK_PROFILES"))
+    if profiles:
+        return profiles
+    return [{
+        "code": STOCK_CODE,
+        "name": STOCK_NAME,
+        "market": STOCK_MARKET,
+        "themes": list(STOCK_THEMES),
+        "business": STOCK_BUSINESS,
+        "positions": list(POSITIONS),
+    }]
 
 
 def BuildGithubPagesReportBase() -> str:
