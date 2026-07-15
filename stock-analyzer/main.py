@@ -308,7 +308,8 @@ def JobNewsWatch(
                     headline = (
                         str(items[0].get("title", "")) if items else NEWS_WATCH_LABEL
                     )
-                if not TryClaimNewsAlert(code, headline):
+                group_id = config.STOCK_GROUP or group or "default"
+                if not TryClaimNewsAlert(headline, group=group_id):
                     continue
                 news_bundle = EnrichCatalystWithLlm(
                     news_bundle, data, trigger_headline=headline,

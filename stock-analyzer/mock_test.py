@@ -793,8 +793,8 @@ def RunCatalystNewsAndAlertTest() -> bool:
         chr(97 + (int(x) % 26)) for x in str(int(datetime.now().timestamp() * 1000))[-10:]
     )
     uniq = f"testdizheuniq{uniq_suffix}"
-    claim1 = TryClaimNewsAlert("301075", uniq)
-    claim2 = TryClaimNewsAlert("301075", uniq)
+    claim1 = TryClaimNewsAlert(uniq, group="pharma")
+    claim2 = TryClaimNewsAlert(uniq, group="pharma")
     dedup_ok = claim1 and not claim2
 
     # 当日直接催化高亮
@@ -927,7 +927,7 @@ def RunNewsWatchTitleTest() -> bool:
 
 
 def RunNewsFreshnessAndDedupTest() -> bool:
-    """旧闻/无时间拒推；近 18h 可推；标点差异标题归一化去重。"""
+    """旧闻/无时间拒推；近 18h 可推；群级归一化去重与跨群隔离。"""
     from news_alert_gate import (
         EvaluateNewsAlert,
         IsNewsFreshEnough,
@@ -984,10 +984,17 @@ def RunNewsFreshnessAndDedupTest() -> bool:
     # 用字母后缀避免「数字→N」后与历史测试键碰撞
     suffix = "".join(chr(97 + (int(x) % 26)) for x in str(int(now.timestamp() * 1000))[-8:])
     base = f"迪哲医药海外授权去重校验{suffix}"
-    claim1 = TryClaimNewsAlert("301075", f"{base}！！")
-    claim2 = TryClaimNewsAlert("301075", f"{base}  ")
-    claim3 = TryClaimNewsAlert("301075", f"{base}。")
+    claim1 = TryClaimNewsAlert(f"{base}！！", group="pharma")
+    claim2 = TryClaimNewsAlert(f"{base}  ", group="pharma")
+    claim3 = TryClaimNewsAlert(f"{base}。", group="pharma")
     dedup_norm_ok = claim1 and not claim2 and not claim3
+
+    # 同标题不同群可各推一次；同群第二次拒绝
+    cross = f"跨群去重校验{suffix}"
+    cross_pharma = TryClaimNewsAlert(cross, group="pharma")
+    cross_oil = TryClaimNewsAlert(cross, group="oil_short")
+    cross_pharma2 = TryClaimNewsAlert(cross, group="pharma")
+    cross_group_ok = cross_pharma and cross_oil and not cross_pharma2
 
     stale_direct = {
         "title": "公司获得药品注册证书",
@@ -1009,7 +1016,7 @@ def RunNewsFreshnessAndDedupTest() -> bool:
 
     return all([
         fresh_ok, stale_ok, no_time_ok, eval_ok,
-        norm_ok, dedup_norm_ok, stale_direct_ok,
+        norm_ok, dedup_norm_ok, cross_group_ok, stale_direct_ok,
     ])
 
 

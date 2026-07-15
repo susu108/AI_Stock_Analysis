@@ -157,22 +157,28 @@ def _PruneAlertDedup(state: dict[str, str]) -> dict[str, str]:
     return kept
 
 
-def BuildNewsAlertKey(stock_code: str, title: str) -> str:
-    """构建资讯告警去重键（按归一化标题）。"""
+def BuildNewsAlertKey(group: str, title: str) -> str:
+    """构建资讯告警去重键（按监控组 + 归一化标题）。"""
     day = datetime.now().strftime("%Y-%m-%d")
+    group_id = (group or config.STOCK_GROUP or "default").strip() or "default"
     norm = NormalizeAlertTitle(title)
     digest = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:12]
-    return f"{day}:{stock_code.strip()}:{digest}"
+    return f"{day}:{group_id}:{digest}"
 
 
-def TryClaimNewsAlert(stock_code: str, title: str) -> bool:
-    """认领一条资讯告警；同归一化标题 24 小时内不可重复。"""
+def TryClaimNewsAlert(title: str, group: str | None = None) -> bool:
+    """认领一条资讯告警；同监控组、同归一化标题 24 小时内不可重复。"""
     if not title.strip():
         return False
-    key = BuildNewsAlertKey(stock_code, title)
+    group_id = (group or config.STOCK_GROUP or "default").strip() or "default"
+    key = BuildNewsAlertKey(group_id, title)
     state = _PruneAlertDedup(_LoadAlertDedup())
     if key in state:
-        logger.info("资讯告警去重命中，跳过: %s", title[:40])
+        logger.info(
+            "资讯告警去重命中（群=%s），跳过: %s",
+            group_id,
+            title[:40],
+        )
         return False
     state[key] = datetime.now().isoformat(timespec="seconds")
     _SaveAlertDedup(state)
