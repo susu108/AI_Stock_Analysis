@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 import config
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -773,16 +773,24 @@ def RunCatalystNewsAndAlertTest() -> bool:
                 "category": "sector",
                 "is_catalyst": True,
                 "strength": 4,
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
             },
         ],
         "news_score": 10.0,
         "impact_stats": {"total": 1, "by_category": {"sector": 1}},
     }
+    # items 列表里的催化条目也补时间，供 _StrongCatalystHits 扫描
+    for it in news_bundle["items"]:
+        if it.get("is_catalyst") and not it.get("time"):
+            it["time"] = datetime.now().strftime("%Y-%m-%d %H:%M")
     verdict = EvaluateNewsAlert(news_bundle, 10.0)
     gate_ok = bool(verdict.get("worthy")) and "迪哲" in str(verdict.get("headline", ""))
 
-    # 去重：第二次同标题应拒绝
-    uniq = f"test-dizhe-{datetime.now().timestamp()}"
+    # 去重：第二次同标题应拒绝（后缀用字母，避免「数字→N」跨次碰撞）
+    uniq_suffix = "".join(
+        chr(97 + (int(x) % 26)) for x in str(int(datetime.now().timestamp() * 1000))[-10:]
+    )
+    uniq = f"testdizheuniq{uniq_suffix}"
     claim1 = TryClaimNewsAlert("301075", uniq)
     claim2 = TryClaimNewsAlert("301075", uniq)
     dedup_ok = claim1 and not claim2
@@ -914,6 +922,93 @@ def RunNewsWatchTitleTest() -> bool:
     finally:
         config.LLM_ENABLED = saved_llm
         config.STOCK_GROUP_LABEL = saved_label
+
+
+def RunNewsFreshnessAndDedupTest() -> bool:
+    """旧闻/无时间拒推；近 18h 可推；标点差异标题归一化去重。"""
+    from news_alert_gate import (
+        EvaluateNewsAlert,
+        IsNewsFreshEnough,
+        NormalizeAlertTitle,
+        TryClaimNewsAlert,
+    )
+
+    now = datetime.now()
+    fresh_ts = (now - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
+    stale_ts = (now - timedelta(hours=40)).strftime("%Y-%m-%d %H:%M")
+
+    fresh_item = {
+        "title": "迪哲医药爆出6亿美元海外授权重磅大单",
+        "content": "创新药板块集体高开",
+        "impact": "中性",
+        "directness": "indirect",
+        "category": "sector",
+        "is_catalyst": True,
+        "strength": 4,
+        "time": fresh_ts,
+    }
+    stale_item = {
+        **fresh_item,
+        "time": stale_ts,
+        "title": "两天前迪哲医药海外授权旧闻",
+    }
+    no_time_item = {k: v for k, v in fresh_item.items() if k != "time"}
+    no_time_item["title"] = "无发布时间的催化稿"
+
+    fresh_ok = IsNewsFreshEnough(fresh_item)
+    stale_ok = not IsNewsFreshEnough(stale_item)
+    no_time_ok = not IsNewsFreshEnough(no_time_item)
+
+    fresh_verdict = EvaluateNewsAlert(
+        {"items": [fresh_item], "relevant_items": [fresh_item]}, 10.0,
+    )
+    stale_verdict = EvaluateNewsAlert(
+        {"items": [stale_item], "relevant_items": [stale_item]}, 10.0,
+    )
+    no_time_verdict = EvaluateNewsAlert(
+        {"items": [no_time_item], "relevant_items": [no_time_item]}, 10.0,
+    )
+    eval_ok = (
+        bool(fresh_verdict.get("worthy"))
+        and not stale_verdict.get("worthy")
+        and stale_verdict.get("reason") in ("stale_news", "no_fresh_catalyst")
+        and not no_time_verdict.get("worthy")
+    )
+
+    norm_a = NormalizeAlertTitle("迪哲医药，海外授权！！")
+    norm_b = NormalizeAlertTitle("迪哲医药 海外授权")
+    norm_ok = norm_a == norm_b and bool(norm_a)
+
+    # 用字母后缀避免「数字→N」后与历史测试键碰撞
+    suffix = "".join(chr(97 + (int(x) % 26)) for x in str(int(now.timestamp() * 1000))[-8:])
+    base = f"迪哲医药海外授权去重校验{suffix}"
+    claim1 = TryClaimNewsAlert("301075", f"{base}！！")
+    claim2 = TryClaimNewsAlert("301075", f"{base}  ")
+    claim3 = TryClaimNewsAlert("301075", f"{base}。")
+    dedup_norm_ok = claim1 and not claim2 and not claim3
+
+    stale_direct = {
+        "title": "公司获得药品注册证书",
+        "content": "利好",
+        "impact": "涨",
+        "directness": "direct",
+        "relevant": True,
+        "category": "stock",
+        "strength": 5,
+        "time": stale_ts,
+    }
+    direct_verdict = EvaluateNewsAlert(
+        {"relevant_items": [stale_direct], "items": [stale_direct]}, 20.0,
+    )
+    stale_direct_ok = (
+        not direct_verdict.get("worthy")
+        and direct_verdict.get("reason") == "stale_news"
+    )
+
+    return all([
+        fresh_ok, stale_ok, no_time_ok, eval_ok,
+        norm_ok, dedup_norm_ok, stale_direct_ok,
+    ])
 
 
 def RunCatalystLlmDisplayTest() -> bool:
@@ -1379,6 +1474,9 @@ def RunMockTest() -> None:
     news_watch_title_ok = RunNewsWatchTitleTest()
     print(f"资讯哨兵标题区分: {'通过' if news_watch_title_ok else '失败'}")
 
+    fresh_dedup_ok = RunNewsFreshnessAndDedupTest()
+    print(f"哨兵新鲜度与去重: {'通过' if fresh_dedup_ok else '失败'}")
+
     catalyst_llm_ok = RunCatalystLlmDisplayTest()
     print(f"AI催化解读展示: {'通过' if catalyst_llm_ok else '失败'}")
 
@@ -1406,7 +1504,8 @@ def RunMockTest() -> None:
         or not theme_mismatch_ok or not trading_day_date_ok
         or not multi_stock_ok or not oil_group_ok
         or not oil_short_play_ok or not catalyst_alert_ok
-        or not news_watch_title_ok or not catalyst_llm_ok
+        or not news_watch_title_ok or not fresh_dedup_ok
+        or not catalyst_llm_ok
         or not news_prefetch_ok or not news_judge_ok
     ):
         raise SystemExit(1)

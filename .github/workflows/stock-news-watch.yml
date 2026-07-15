@@ -98,6 +98,20 @@ jobs:
           SECTOR_PEER_WATCH=${SECTOR_PEER_WATCH:-}
           EOF
 
+      - name: Resolve Shanghai day
+        id: date
+        run: echo "day=$(TZ=Asia/Shanghai date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore news-alert dedup cache
+        id: dedup-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: stock-analyzer/.news_alert_dedup.json
+          key: news-alert-dedup-${{ matrix.group }}-${{ steps.date.outputs.day }}-${{ github.run_id }}
+          restore-keys: |
+            news-alert-dedup-${{ matrix.group }}-${{ steps.date.outputs.day }}-
+            news-alert-dedup-${{ matrix.group }}-
+
       - name: Window gate (Asia/Shanghai)
         id: window
         run: |
@@ -123,6 +137,13 @@ jobs:
             echo "outside trading hours, skip"
           fi
 
+      - name: Ensure dedup file exists
+        if: steps.window.outputs.in_window == 'true'
+        run: |
+          if [ ! -f .news_alert_dedup.json ]; then
+            echo '{}' > .news_alert_dedup.json
+          fi
+
       - name: Run news watch
         if: steps.window.outputs.in_window == 'true'
         run: |
@@ -133,3 +154,10 @@ jobs:
           fi
           echo "Running news-watch group=$GROUP $IGNORE"
           python main.py --news-watch --group "$GROUP" $IGNORE
+
+      - name: Save news-alert dedup cache
+        if: steps.window.outputs.in_window == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: stock-analyzer/.news_alert_dedup.json
+          key: news-alert-dedup-${{ matrix.group }}-${{ steps.date.outputs.day }}-${{ github.run_id }}
