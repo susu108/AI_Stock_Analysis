@@ -916,6 +916,167 @@ def RunNewsWatchTitleTest() -> bool:
         config.STOCK_GROUP_LABEL = saved_label
 
 
+def RunCatalystLlmDisplayTest() -> bool:
+    """哨兵报告展示 AI 催化解读；规则兜底不含占位语。"""
+    from dingtalk_pusher import (
+        BuildCompactDingTalkReportMarkdown,
+        NEWS_WATCH_LABEL,
+        _ItemDisplayReason,
+    )
+    from news_analyzer import _ApplyRuleFallback, _RuleFallbackImpactReason
+
+    saved_llm = config.LLM_ENABLED
+    config.LLM_ENABLED = False
+    try:
+        data = {
+            "realtime": BuildMockRealtime(),
+            "kline": BuildMockKline(),
+            "concept": BuildMockConceptBoards(),
+            "industry": BuildMockIndustryBoards(),
+            "fund_flow": BuildMockFundFlow(),
+        }
+        analysis = AnalyzeAll(data)
+
+        catalyst_item = {
+            "title": "迪哲医药6亿美元海外授权大单引爆创新药板块",
+            "content": "创新药板块集体高开",
+            "impact": "中性",
+            "directness": "indirect",
+            "category": "sector",
+            "is_catalyst": True,
+            "strength": 4,
+            "impact_reason": "板块情绪传导，对本公司间接影响",
+        }
+        news_bundle = {
+            "relevant_items": [catalyst_item],
+            "scored_items": [catalyst_item],
+            "impact_stats": {"total": 1, "by_category": {"sector": 1}},
+            "analysis_source": "ai",
+            "catalyst_llm": {
+                "catalyst_summary": (
+                    "迪哲海外授权大单提振创新药板块情绪，"
+                    "多瑞生物主业为补液注射液，传导以板块跟风为主，勿当个股直接订单。"
+                ),
+                "impact_on_stock": "涨",
+                "action_hint": "板块情绪利好，勿当个股直接订单",
+                "trigger_title": catalyst_item["title"][:40],
+            },
+        }
+        advice = GenerateAdvice(
+            analysis, data, news_items=[], news_bundle=news_bundle,
+            session_label=NEWS_WATCH_LABEL,
+        )
+        advice["news_bundle"] = news_bundle
+        report = BuildCompactDingTalkReportMarkdown(
+            data, analysis, advice, session_label=NEWS_WATCH_LABEL,
+        )
+        llm_display_ok = (
+            "AI催化解读" in report
+            and "对本股影响" in report
+            and "操作建议" in report
+            and "勿当个股直接订单" in report
+        )
+
+        rule_items = [
+            {
+                "title": "医药板块震荡走强，资金关注创新药",
+                "content": "板块普涨",
+                "category": "sector",
+                "is_catalyst": True,
+            },
+        ]
+        rule_reason = _RuleFallbackImpactReason(rule_items[0])
+        rule_scored = _ApplyRuleFallback(rule_items, data)
+        rule_ok = (
+            "建议启用 AI" not in rule_reason
+            and "规则兜底" not in rule_reason
+            and all(
+                "建议启用 AI" not in str(i.get("impact_reason", ""))
+                for i in rule_scored
+            )
+        )
+        display_reason_ok = (
+            _ItemDisplayReason({
+                "impact_reason": "规则兜底，建议启用 AI 获取精准影响",
+                "title": "测试标题摘要",
+            }) == "测试标题摘要"
+        )
+        return llm_display_ok and rule_ok and display_reason_ok
+    finally:
+        config.LLM_ENABLED = saved_llm
+
+
+def RunNewsPrefetchTest() -> bool:
+    """哨兵 prefetch 复用 bundle 时不重复 FetchNews。"""
+    from unittest.mock import patch
+
+    from main import _JobForCurrentProfile
+
+    fetch_count = {"n": 0}
+
+    def _CountFetch(*_args, **_kwargs):
+        fetch_count["n"] += 1
+        return BuildMockNews()
+
+    def _FakeFetchAll():
+        return {
+            "realtime": BuildMockRealtime(),
+            "kline": BuildMockKline(),
+            "concept": BuildMockConceptBoards(),
+            "industry": BuildMockIndustryBoards(),
+            "fund_flow": BuildMockFundFlow(),
+        }
+
+    def _FakeAnalyze(bundle, data):
+        bundle = dict(bundle)
+        bundle["analysis_source"] = "rule"
+        bundle["relevant_items"] = list(bundle.get("items") or [])[:2]
+        return bundle
+
+    def _FakeEnrich(bundle, data, trigger_headline=""):
+        return bundle
+
+    def _FakeAnalyzeAll(_data):
+        return {"direction": "震荡", "tech_score": 0, "fund_score": 0,
+                "sector_score": 0, "news_score": 0, "weighted_score": 0,
+                "indicators": {"price": 61.67}}
+
+    def _FakeMerge(analysis, _bundle):
+        return analysis
+
+    def _FakeAdvice(*_args, **_kwargs):
+        return {"buy_ok": False, "sell_ok": False, "llm_used": False}
+
+    def _FakePush(*_args, **_kwargs):
+        return None
+
+    saved_llm = config.LLM_ENABLED
+    config.LLM_ENABLED = False
+    try:
+        data = _FakeFetchAll()
+        bundle = _FakeAnalyze(BuildMockNews(), data)
+        prefetch = {"data": data, "news_bundle": bundle}
+
+        with patch("main.FetchNews", side_effect=_CountFetch), \
+             patch("main.FetchAllData", side_effect=_FakeFetchAll), \
+             patch("main.AnalyzeNewsImpact", side_effect=_FakeAnalyze), \
+             patch("main.EnrichCatalystWithLlm", side_effect=_FakeEnrich), \
+             patch("main.AnalyzeAll", side_effect=_FakeAnalyzeAll), \
+             patch("main.MergeNewsIntoAnalysis", side_effect=_FakeMerge), \
+             patch("main.GenerateAdvice", side_effect=_FakeAdvice), \
+             patch("main.PushReport", side_effect=_FakePush), \
+             patch("main.ResolveSessionAndHorizon", return_value=("盘中", {})):
+            _JobForCurrentProfile(
+                session_label="资讯速报",
+                force_run=True,
+                prefetch=prefetch,
+                trigger_headline="测试触发",
+            )
+        return fetch_count["n"] == 0
+    finally:
+        config.LLM_ENABLED = saved_llm
+
+
 def RunThemeMismatchTest() -> bool:
     """验证板块/政策 GLP-1 资讯不会被误标为个股利好。"""
     saved_themes = list(config.STOCK_THEMES)
@@ -1218,6 +1379,12 @@ def RunMockTest() -> None:
     news_watch_title_ok = RunNewsWatchTitleTest()
     print(f"资讯哨兵标题区分: {'通过' if news_watch_title_ok else '失败'}")
 
+    catalyst_llm_ok = RunCatalystLlmDisplayTest()
+    print(f"AI催化解读展示: {'通过' if catalyst_llm_ok else '失败'}")
+
+    news_prefetch_ok = RunNewsPrefetchTest()
+    print(f"哨兵 prefetch 复用: {'通过' if news_prefetch_ok else '失败'}")
+
     news_judge_ok = (
         "资讯研判" in report
         and "个股直接利好" in report
@@ -1239,7 +1406,8 @@ def RunMockTest() -> None:
         or not theme_mismatch_ok or not trading_day_date_ok
         or not multi_stock_ok or not oil_group_ok
         or not oil_short_play_ok or not catalyst_alert_ok
-        or not news_watch_title_ok or not news_judge_ok
+        or not news_watch_title_ok or not catalyst_llm_ok
+        or not news_prefetch_ok or not news_judge_ok
     ):
         raise SystemExit(1)
 

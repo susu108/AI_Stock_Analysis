@@ -212,6 +212,38 @@ def _HighlightSameDayCatalystLine(
     )
 
 
+def _FormatCatalystLlmBlock(advice: dict[str, Any]) -> list[str]:
+    """资讯哨兵：展示 AI 催化专项解读块。"""
+    news_bundle = advice.get("news_bundle") or {}
+    llm = news_bundle.get("catalyst_llm") or {}
+    summary = str(llm.get("catalyst_summary", "")).strip()
+    if not summary:
+        return []
+    impact = str(llm.get("impact_on_stock", "中性")).strip()
+    hint = str(llm.get("action_hint", "")).strip()
+    lines = [f"- **AI催化解读** {_TruncateText(summary, 120)}"]
+    if impact or hint:
+        parts = []
+        if impact:
+            parts.append(f"**对本股影响** {impact}")
+        if hint:
+            parts.append(f"**操作建议** {_TruncateText(hint, 60)}")
+        lines.append(f"- {' ｜ '.join(parts)}")
+    return lines
+
+
+def _CatalystBannerReason(advice: dict[str, Any], item: dict[str, Any]) -> str:
+    """当日催化横幅文案：优先 AI 解读首句，否则 impact_reason/标题。"""
+    news_bundle = advice.get("news_bundle") or {}
+    llm = news_bundle.get("catalyst_llm") or {}
+    summary = str(llm.get("catalyst_summary", "")).strip()
+    if summary:
+        first = summary.split("。")[0].strip()
+        if first:
+            return first + ("。" if "。" in summary and first != summary else "")
+    return _ItemDisplayReason(item)
+
+
 def _FormatSameDayDirectBanner(advice: dict[str, Any]) -> str:
     """结论区醒目横幅：当日个股直接涨/跌催化。"""
     news_bundle = advice.get("news_bundle") or {}
@@ -235,7 +267,7 @@ def _FormatSameDayDirectBanner(advice: dict[str, Any]) -> str:
         return ""
     item = today_direct[0]
     impact = str(item.get("impact", ""))
-    reason = _ItemDisplayReason(item)
+    reason = _CatalystBannerReason(advice, item)
     if not reason:
         return ""
     short = _TruncateText(reason, 56)
@@ -1601,12 +1633,18 @@ def _BuildCompactHeaderSection(
         *_ReportHeaderTitleLines(session_label),
         "",
         f"**{session_label}** ｜ {NowStr()}",
+    ]
+    if IsNewsWatchSession(session_label):
+        catalyst_lines = _FormatCatalystLlmBlock(advice)
+        if catalyst_lines:
+            lines.extend(["", *catalyst_lines])
+    lines.extend([
         "",
         f"**现价** {_BoldPrice(price, 'up' if change_pct >= 0 else 'down')}  "
         f"{_FormatChangeDisplay(change_pct, change_amt)}",
         "",
         f"**方向** {_DirectionBadge(header_direction, header_icon)}",
-    ]
+    ])
     if horizon:
         target = str(horizon.get("near_term_target", "")).strip()
         if target:
@@ -1657,6 +1695,7 @@ def _FormatOilNewsAlertBanner(advice: dict[str, Any]) -> str:
 def _BuildCompactNewsSection(
     advice: dict[str, Any],
     ai_tag: str,
+    session_label: str = "盘中",
 ) -> list[str]:
     """构建精简版资讯研判（单一资讯块，无逐条分类长列表）。"""
     news_summary = str(advice.get("news_summary", "")).strip()
@@ -1710,6 +1749,11 @@ def _BuildCompactNewsSection(
     same_day_banner = _FormatSameDayDirectBanner(advice)
     if same_day_banner:
         lines.append(f"- {same_day_banner}")
+    if IsNewsWatchSession(session_label):
+        catalyst_lines = _FormatCatalystLlmBlock(advice)
+        for cl in catalyst_lines:
+            if cl not in lines:
+                lines.append(cl)
     if stats:
         lines.append(
             f"- 采集 **{stats.get('total', 0)}** 条"
@@ -2101,7 +2145,7 @@ def BuildCompactDingTalkReportMarkdown(
         include_near_target=False,
     ))
 
-    news_section = _BuildCompactNewsSection(advice, ai_tag)
+    news_section = _BuildCompactNewsSection(advice, ai_tag, session_label)
     if news_section:
         lines.extend([
             _SectionDivider(),

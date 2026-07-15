@@ -6,6 +6,7 @@ import argparse
 import sys
 import time
 from datetime import datetime
+from typing import Any
 
 import schedule
 
@@ -14,8 +15,10 @@ from advisor import GenerateAdvice
 from analyzer import AnalyzeAll, MergeNewsIntoAnalysis
 from data_fetcher import FetchAllData
 from dingtalk_pusher import NEWS_WATCH_LABEL, PushErrorNotice, PushPortfolioReport, PushReport
+from llm_advisor import IsLlmEnabled
 from market_context import ResolveSessionAndHorizon
 from news_analyzer import AnalyzeNewsImpact
+from news_catalyst_llm import EnrichCatalystWithLlm
 from news_fetcher import FetchNews, FlattenNewsItems
 from portfolio_advisor import GeneratePortfolioAdvice
 from scheduler_guard import ReleasePushSlot, TryAcquireSchedulerLock, TryClaimPushSlot
@@ -138,6 +141,8 @@ def _JobForCurrentProfile(
     session_label: str | None = None,
     push_time: str | None = None,
     force_run: bool = False,
+    prefetch: dict[str, Any] | None = None,
+    trigger_headline: str = "",
 ) -> None:
     """对当前 config 中的股票执行一次日常分析推送。"""
     label = session_label or GetSessionLabel(push_time)
@@ -156,17 +161,33 @@ def _JobForCurrentProfile(
     )
 
     try:
-        logger.info("正在拉取实时行情与 K 线...")
-        data = FetchAllData()
+        pref = prefetch or {}
+        pref_data = pref.get("data")
+        pref_bundle = pref.get("news_bundle")
 
-        logger.info("正在并行拉取多源资讯（个股/板块/政策/宏观/联网）...")
-        news_bundle = FetchNews(data)
-        news_bundle = AnalyzeNewsImpact(news_bundle, data)
+        if pref_data is not None:
+            logger.info("复用哨兵预拉行情数据")
+            data = pref_data
+        else:
+            logger.info("正在拉取实时行情与 K 线...")
+            data = FetchAllData()
+
+        if pref_bundle is not None:
+            logger.info("复用哨兵已分析资讯包（跳过 FetchNews）")
+            news_bundle = dict(pref_bundle)
+        else:
+            logger.info("正在并行拉取多源资讯（个股/板块/政策/宏观/联网）...")
+            news_bundle = FetchNews(data)
+            news_bundle = AnalyzeNewsImpact(news_bundle, data)
+
+        news_bundle = EnrichCatalystWithLlm(
+            news_bundle, data, trigger_headline=trigger_headline,
+        )
         news_items = FlattenNewsItems(news_bundle)
         stats = news_bundle.get("impact_stats", {})
         by_category = stats.get("by_category", {})
         logger.info(
-            "资讯就绪 — 个股:%s 板块:%s 政策:%s 宏观:%s 联网:%s ｜ 相关:%s 涨/跌:%s",
+            "资讯就绪 — 个股:%s 板块:%s 政策:%s 宏观:%s 联网:%s ｜ 相关:%s 涨/跌:%s ｜ 来源:%s",
             by_category.get("stock", 0),
             by_category.get("sector", 0),
             by_category.get("policy", 0),
@@ -174,6 +195,7 @@ def _JobForCurrentProfile(
             by_category.get("web_search", 0),
             stats.get("relevant", 0),
             stats.get("impactful", 0),
+            news_bundle.get("analysis_source", "?"),
         )
 
         if data.get("realtime") is None and data.get("kline") is None:
@@ -243,6 +265,9 @@ def JobNewsWatch(
         TryClaimNewsAlert,
     )
 
+    llm_status = "enabled" if IsLlmEnabled() else "disabled"
+    logger.info("news-watch: LLM 资讯分析 %s", llm_status)
+
     if not ignore_window and not IsInNewsWatchWindow():
         logger.info("news-watch: 当前不在哨兵窗口，skip")
         return 0
@@ -285,6 +310,9 @@ def JobNewsWatch(
                     )
                 if not TryClaimNewsAlert(code, headline):
                     continue
+                news_bundle = EnrichCatalystWithLlm(
+                    news_bundle, data, trigger_headline=headline,
+                )
                 logger.info(
                     "news-watch: 触发推送 %s — %s (%s)",
                     code,
@@ -294,6 +322,8 @@ def JobNewsWatch(
                 _JobForCurrentProfile(
                     session_label=NEWS_WATCH_LABEL,
                     force_run=True,
+                    prefetch={"data": data, "news_bundle": news_bundle},
+                    trigger_headline=headline,
                 )
                 pushed += 1
             except Exception as exc:

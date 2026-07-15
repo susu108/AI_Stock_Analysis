@@ -22,6 +22,7 @@ from utils import SafeFloat, SetupLogger
 logger = SetupLogger(config.LOG_LEVEL)
 
 _LLM_TIMEOUT = 90
+_CATALYST_SUBSET_LIMIT = 8
 _VALID_IMPACTS = frozenset({"涨", "跌", "中性", "无关"})
 _VALID_DIRECTNESS = frozenset({"direct", "indirect", "mismatch"})
 _CATEGORY_GUARDS = frozenset({"sector", "policy", "macro", "web_search"})
@@ -107,8 +108,8 @@ def _ParseScoringResult(content: str) -> list[dict[str, Any]] | None:
         return None
 
 
-def _CallNewsScoring(context: str) -> list[dict[str, Any]] | None:
-    """调用 DeepSeek 批量评分资讯。"""
+def _CallNewsScoring(context: str, *, retry: int = 1) -> list[dict[str, Any]] | None:
+    """调用 DeepSeek 批量评分资讯（失败自动重试）。"""
     url = f"{config.DEEPSEEK_BASE_URL.rstrip('/')}/chat/completions"
     headers = {
         "Authorization": f"Bearer {config.DEEPSEEK_API_KEY}",
@@ -124,15 +125,138 @@ def _CallNewsScoring(context: str) -> list[dict[str, Any]] | None:
         "temperature": 0.2,
         "max_tokens": 2048,
     }
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=_LLM_TIMEOUT)
-        resp.raise_for_status()
-        body = resp.json()
-        content = body["choices"][0]["message"]["content"]
-        return _ParseScoringResult(content)
-    except Exception as exc:
-        logger.error("资讯影响分析 API 失败: %s", exc)
-        return None
+    last_exc: Exception | None = None
+    for attempt in range(retry + 1):
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=_LLM_TIMEOUT)
+            resp.raise_for_status()
+            body = resp.json()
+            content = body["choices"][0]["message"]["content"]
+            parsed = _ParseScoringResult(content)
+            if parsed is not None:
+                return parsed
+            last_exc = ValueError("资讯评分 JSON 解析为空")
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retry:
+                logger.warning("资讯 AI 评分第 %d 次失败，重试: %s", attempt + 1, exc)
+    logger.error("资讯影响分析 API 失败: %s", last_exc)
+    return None
+
+
+def _RuleFallbackImpactReason(item: dict[str, Any]) -> str:
+    """规则兜底 impact_reason：用标题/摘要，不写占位语。"""
+    title = str(item.get("title", "")).strip()
+    content = str(item.get("content", "")).strip()
+    cat = str(item.get("category", "stock"))
+    if item.get("is_catalyst"):
+        short = title[:40] + ("…" if len(title) > 40 else "")
+        return f"板块催化：{short}" if short else "板块催化资讯"
+    if cat == "stock" and title:
+        return title[:50] + ("…" if len(title) > 50 else "")
+    if title:
+        return title[:40] + ("…" if len(title) > 40 else "")
+    if content:
+        return content[:40] + ("…" if len(content) > 40 else "")
+    return f"对{_DomainLabel()}环境有间接影响"
+
+
+def _PickCatalystPriorityItems(
+    items: list[dict[str, str]],
+    limit: int = _CATALYST_SUBSET_LIMIT,
+) -> tuple[list[dict[str, str]], list[int]]:
+    """挑选催化优先子集及在原列表中的索引。"""
+    indexed = list(enumerate(items))
+    catalyst = [(i, it) for i, it in indexed if it.get("is_catalyst")]
+    stock_items = [(i, it) for i, it in indexed if it.get("category") == "stock"]
+    sector_items = [(i, it) for i, it in indexed if it.get("category") == "sector"]
+    picked: list[tuple[int, dict[str, str]]] = []
+    seen: set[int] = set()
+    for group in (catalyst, stock_items, sector_items):
+        for idx, it in group:
+            if idx in seen:
+                continue
+            picked.append((idx, it))
+            seen.add(idx)
+            if len(picked) >= limit:
+                break
+        if len(picked) >= limit:
+            break
+    if not picked:
+        picked = indexed[:limit]
+    subset = [it for _, it in picked]
+    orig_indices = [i for i, _ in picked]
+    return subset, orig_indices
+
+
+def _MergeSubsetScores(
+    items: list[dict[str, str]],
+    rule_scored: list[dict[str, Any]],
+    subset_indices: list[int],
+    subset_scores: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """将催化子集 AI 评分合并回完整列表（按原 index）。"""
+    result = list(rule_scored)
+    score_by_subset_idx: dict[int, dict[str, Any]] = {}
+    for s in subset_scores:
+        try:
+            sub_idx = int(s.get("index", -1))
+            if sub_idx >= 0:
+                score_by_subset_idx[sub_idx] = s
+        except (TypeError, ValueError):
+            continue
+    for sub_i, orig_i in enumerate(subset_indices):
+        score = score_by_subset_idx.get(sub_i)
+        if score is None or orig_i >= len(result):
+            continue
+        cat = str(items[orig_i].get("category", "stock"))
+        impact = str(score.get("impact", "中性")).strip()
+        if impact not in _VALID_IMPACTS:
+            impact = "中性"
+        relevant = bool(score.get("relevant", impact != "无关"))
+        if impact == "无关":
+            relevant = False
+        result[orig_i] = {
+            **result[orig_i],
+            "relevant": relevant,
+            "impact": impact,
+            "directness": _NormalizeDirectness(score.get("directness"), cat),
+            "impact_reason": str(score.get("impact_reason", "")).strip()
+            or result[orig_i].get("impact_reason", ""),
+            "strength": int(score.get("strength", 1) or 1),
+        }
+    return result
+
+
+def _ScoreWithLlm(
+    items: list[dict[str, str]],
+    company_context: list[str],
+    data: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], str]:
+    """LLM 评分：全量 → 重试 → 催化子集；返回 scored 与 analysis_source。"""
+    context = _BuildNewsListContext(items, company_context)
+    scores = _CallNewsScoring(context, retry=1)
+    if scores is not None:
+        scored = _MergeScores(items, scores)
+        scored = _ApplyCategoryRelevanceGuard(scored)
+        return _ApplyDirectnessGuard(scored, data), "ai"
+
+    logger.warning("资讯 AI 全量评分失败，尝试催化优先子集")
+    subset, orig_indices = _PickCatalystPriorityItems(items)
+    if subset:
+        sub_context = _BuildNewsListContext(subset, company_context)
+        sub_scores = _CallNewsScoring(sub_context, retry=1)
+        if sub_scores is not None:
+            rule_base = _ApplyCategoryRelevanceGuard(_ApplyRuleFallback(items, data))
+            merged = _MergeSubsetScores(items, rule_base, orig_indices, sub_scores)
+            return _ApplyDirectnessGuard(merged, data), "ai_partial"
+
+    logger.warning("资讯 AI 评分失败，使用规则兜底")
+    scored = _ApplyDirectnessGuard(
+        _ApplyCategoryRelevanceGuard(_ApplyRuleFallback(items, data)),
+        data,
+    )
+    return scored, "rule"
 
 
 def _IsClearlyIrrelevant(title: str, content: str) -> bool:
@@ -310,7 +434,7 @@ def _ApplyRuleFallback(
             "relevant": True,
             "impact": impact,
             "directness": directness,
-            "impact_reason": "规则兜底，建议启用 AI 获取精准影响",
+            "impact_reason": _RuleFallbackImpactReason(item),
             "strength": strength,
         })
     return scored
@@ -476,6 +600,7 @@ def AnalyzeNewsImpact(
         news_bundle["background_items"] = []
         news_bundle["news_score"] = 0.0
         news_bundle["news_signals"] = []
+        news_bundle["analysis_source"] = "rule"
         if IsOilShortGroup():
             news_bundle["oil_news_alert"] = AggregateOilNewsAlert(news_bundle, 0.0)
         return news_bundle
@@ -483,18 +608,12 @@ def AnalyzeNewsImpact(
     company_context = BuildCompanyNewsContext(data, news_bundle)
     logger.info("正在分析 %d 条资讯对 %s 的影响...", len(items), config.STOCK_NAME)
 
+    analysis_source = "rule"
     if IsLlmEnabled():
-        context = _BuildNewsListContext(items, company_context)
-        scores = _CallNewsScoring(context)
-        if scores is not None:
-            scored = _MergeScores(items, scores)
-            scored = _ApplyCategoryRelevanceGuard(scored)
-            scored = _ApplyDirectnessGuard(scored, data)
-        else:
-            logger.warning("资讯 AI 评分失败，使用规则兜底")
-            scored = _ApplyDirectnessGuard(
-                _ApplyCategoryRelevanceGuard(_ApplyRuleFallback(items, data)),
-                data,
+        scored, analysis_source = _ScoreWithLlm(items, company_context, data)
+        if analysis_source == "rule":
+            logger.warning(
+                "LLM 已启用但资讯评分走规则兜底 — 请检查 DEEPSEEK_API_KEY/网络",
             )
     else:
         scored = _ApplyDirectnessGuard(
@@ -525,6 +644,7 @@ def AnalyzeNewsImpact(
     news_bundle["background_items"] = background
     news_bundle["news_score"] = news_score
     news_bundle["news_signals"] = news_signals
+    news_bundle["analysis_source"] = analysis_source
     news_bundle["sector_theme_overlap"] = overlap
     news_bundle["impact_stats"] = {
         "total": len(items),
@@ -542,12 +662,13 @@ def AnalyzeNewsImpact(
 
     logger.info(
         "资讯影响分析 — 有关:%d 直接涨/跌:%d 背景/错配:%d 无关:%d ｜ "
-        "题材重叠:%s ｜ 资讯面:%+.1f",
+        "题材重叠:%s ｜ 资讯面:%+.1f ｜ 来源:%s",
         len(relevant),
         len(impactful),
         len(background),
         irrelevant_count,
         overlap.get("overlap_level", "?"),
         news_score,
+        analysis_source,
     )
     return news_bundle
