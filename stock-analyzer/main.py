@@ -74,6 +74,16 @@ def ParseArgs() -> argparse.Namespace:
         default=None,
         help="仅推送指定监控组（如 pharma / oil_short），默认全部",
     )
+    parser.add_argument(
+        "--news-watch",
+        action="store_true",
+        help="资讯哨兵：轻量拉资讯，命中强催化后再推送完整报告",
+    )
+    parser.add_argument(
+        "--ignore-watch-window",
+        action="store_true",
+        help="news-watch 时忽略交易时段窗口限制（测试用）",
+    )
     return parser.parse_args()
 
 
@@ -220,6 +230,76 @@ def _JobForCurrentProfile(
     logger.info("=" * 50)
 
 
+def JobNewsWatch(
+    group: str | None = None,
+    stock_code: str | None = None,
+    *,
+    ignore_window: bool = False,
+) -> int:
+    """资讯哨兵：组内逐股轻量拉资讯，过门控且未去重则 force 推送。"""
+    from news_alert_gate import (
+        EvaluateNewsAlert,
+        IsInNewsWatchWindow,
+        TryClaimNewsAlert,
+    )
+
+    if not ignore_window and not IsInNewsWatchWindow():
+        logger.info("news-watch: 当前不在哨兵窗口，skip")
+        return 0
+
+    profiles = FilterProfilesByGroup(config.ResolveStockProfiles(), group)
+    profiles = FilterProfilesByCode(profiles, stock_code)
+    if group and not profiles:
+        logger.error("news-watch: 未找到监控组 %s", group)
+        return 1
+    if not profiles:
+        logger.warning("news-watch: 无可用 profile，skip")
+        return 0
+
+    pushed = 0
+    for profile in profiles:
+        with ApplyStockProfile(profile):
+            code = config.STOCK_CODE
+            name = config.STOCK_NAME
+            logger.info("news-watch: 扫描 %s(%s)...", name, code)
+            try:
+                data = FetchAllData()
+                news_bundle = FetchNews(data)
+                news_bundle = AnalyzeNewsImpact(news_bundle, data)
+                verdict = EvaluateNewsAlert(
+                    news_bundle,
+                    float(news_bundle.get("news_score", 0) or 0),
+                )
+                if not verdict.get("worthy"):
+                    logger.info(
+                        "news-watch: skip %s — %s",
+                        code,
+                        verdict.get("reason", ""),
+                    )
+                    continue
+                headline = str(verdict.get("headline") or "").strip()
+                if not headline:
+                    items = news_bundle.get("items") or []
+                    headline = str(items[0].get("title", "")) if items else "资讯速报"
+                if not TryClaimNewsAlert(code, headline):
+                    continue
+                logger.info(
+                    "news-watch: 触发推送 %s — %s (%s)",
+                    code,
+                    headline[:60],
+                    verdict.get("reason"),
+                )
+                _JobForCurrentProfile(
+                    session_label="资讯速报",
+                    force_run=True,
+                )
+                pushed += 1
+            except Exception as exc:
+                logger.exception("news-watch: %s(%s) 异常: %s", name, code, exc)
+    logger.info("news-watch: 完成，推送 %d 只", pushed)
+    return 0
+
+
 def JobPortfolio(force_run: bool = True) -> None:
     """执行分账户持仓建议推送。"""
     logger.info("=" * 50)
@@ -291,10 +371,21 @@ def Main() -> None:
     if args.portfolio:
         logger.warning("持仓专报推送已暂停，请使用日常报告")
         return
-    # if args.portfolio:
-    #     logger.info("股票分析工具 — %s(%s) 模式:持仓建议", config.STOCK_NAME, config.STOCK_CODE)
-    #     JobPortfolio(force_run=True)
-    #     return
+
+    if args.news_watch:
+        logger.info(
+            "股票分析工具 — 模式:资讯哨兵 group=%s ignore_window=%s",
+            args.group or "全部",
+            args.ignore_watch_window,
+        )
+        code = JobNewsWatch(
+            group=args.group,
+            stock_code=args.stock_code,
+            ignore_window=args.ignore_watch_window,
+        )
+        if code:
+            sys.exit(code)
+        return
 
     if args.scheduled:
         label = GetSessionLabel(args.push_time)
@@ -340,6 +431,7 @@ def Main() -> None:
         "分组推送: python main.py --now --group oil_short ｜ "
         "单股推送: python main.py --now --stock-code 301201 ｜ "
         "如需本地常驻调度: python main.py --local-scheduler 或 .env 设 ENABLE_LOCAL_SCHEDULER=true"
+        "｜ 资讯哨兵: python main.py --news-watch --group pharma"
     )
 
 

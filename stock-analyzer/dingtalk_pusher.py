@@ -1501,13 +1501,22 @@ def _BuildCompactNewsSection(
         i for i in relevant_items
         if i.get("impact") == "跌" and str(i.get("directness", "direct")) == "direct"
     ]
-    indirect_items = [i for i in relevant_items if str(i.get("directness", "")) == "indirect"]
+    catalyst_items = [
+        i for i in relevant_items
+        if i.get("is_catalyst")
+        or _LooksLikeCatalystTitle(str(i.get("title", "")), str(i.get("content", "")))
+    ]
+    indirect_items = [
+        i for i in relevant_items
+        if str(i.get("directness", "")) == "indirect" and i not in catalyst_items
+    ]
     mismatch_items = [i for i in relevant_items if str(i.get("directness", "")) == "mismatch"]
 
     has_content = bool(
         news_summary or sector_impact or policy_impact or theme_mismatch_note
         or news_impact or news_conclusion
-        or direct_bullish or direct_bearish or indirect_items or mismatch_items
+        or direct_bullish or direct_bearish or catalyst_items
+        or indirect_items or mismatch_items
         or (IsOilShortGroup() and _FormatOilNewsAlertBanner(advice))
     )
     if not has_content:
@@ -1550,6 +1559,10 @@ def _BuildCompactNewsSection(
         if reason and not _IsReasonCovered(reason, covered_texts):
             lines.append(f"- **个股直接利空** {_TruncateText(reason, 80)}")
             covered_texts.append(reason)
+    for item in _SelectUniqueNewsHighlights(catalyst_items, 2, covered_texts):
+        reason = _ItemDisplayReason(item) or str(item.get("title", ""))
+        lines.append(f"- **板块催化** {_TruncateText(reason, 80)}")
+        covered_texts.append(reason)
     for item in _SelectUniqueNewsHighlights(indirect_items, 2, covered_texts):
         reason = _ItemDisplayReason(item)
         lines.append(f"- **板块背景** {_TruncateText(reason, 80)}")
@@ -1558,6 +1571,15 @@ def _BuildCompactNewsSection(
         lines.append(f"- **题材错配警示** {_TruncateText(reason, 80)}")
     lines.append("")
     return lines
+
+
+def _LooksLikeCatalystTitle(title: str, content: str = "") -> bool:
+    """展示层兜底识别板块催化标题。"""
+    try:
+        from sector_catalyst_watch import IsCatalystText
+        return IsCatalystText(title, content)
+    except Exception:
+        return False
 
 
 def _BuildMarketSignalsSection(

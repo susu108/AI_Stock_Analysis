@@ -1,0 +1,135 @@
+# 资讯哨兵：交易时段拉取资讯，命中强催化后即时推送（与定时 09:00/11:30/14:30 并存）
+# 由 cron-job.org 每约 15 分钟 repository_dispatch type=stock-news-watch 触发
+
+name: Stock News Watch
+
+on:
+  repository_dispatch:
+    types: [stock-news-watch]
+  workflow_dispatch:
+    inputs:
+      ignore_window:
+        description: "忽略交易时段窗口（测试用）"
+        required: false
+        default: false
+        type: boolean
+
+env:
+  TZ: Asia/Shanghai
+
+permissions:
+  contents: read
+
+jobs:
+  news-watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [pharma, oil_short]
+    defaults:
+      run:
+        working-directory: stock-analyzer
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: stock-analyzer/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env from secrets
+        env:
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          DINGTALK_WEBHOOK_OIL: ${{ secrets.DINGTALK_WEBHOOK_OIL }}
+          DINGTALK_SECRET_OIL: ${{ secrets.DINGTALK_SECRET_OIL }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL }}
+          DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL }}
+          POSITIONS: ${{ secrets.POSITIONS }}
+          STOCK_CODE: ${{ vars.STOCK_CODE }}
+          STOCK_NAME: ${{ vars.STOCK_NAME }}
+          STOCK_MARKET: ${{ vars.STOCK_MARKET }}
+          LLM_ENABLED: ${{ vars.LLM_ENABLED }}
+          WEB_SEARCH_ENABLED: ${{ vars.WEB_SEARCH_ENABLED }}
+          WEB_SEARCH_API_KEY: ${{ secrets.WEB_SEARCH_API_KEY }}
+          STOCK_THEMES: ${{ vars.STOCK_THEMES }}
+          STOCK_BUSINESS: ${{ vars.STOCK_BUSINESS }}
+          STOCK_PROFILES: ${{ vars.STOCK_PROFILES }}
+          DINGTALK_REPORT_MODE: ${{ vars.DINGTALK_REPORT_MODE }}
+          SECTOR_PEER_WATCH: ${{ vars.SECTOR_PEER_WATCH }}
+        run: |
+          cat > .env << EOF
+          DINGTALK_WEBHOOK=${DINGTALK_WEBHOOK}
+          DINGTALK_SECRET=${DINGTALK_SECRET}
+          DINGTALK_WEBHOOK_OIL=${DINGTALK_WEBHOOK_OIL}
+          DINGTALK_SECRET_OIL=${DINGTALK_SECRET_OIL}
+          STOCK_CODE=${STOCK_CODE:-301075}
+          STOCK_NAME=${STOCK_NAME:-多瑞生物}
+          STOCK_MARKET=${STOCK_MARKET:-sz}
+          PUSH_TIMES=09:00,11:30,14:30
+          MANUAL_RUN=false
+          ENABLE_LOCAL_SCHEDULER=false
+          KLINE_DAYS=60
+          LOG_LEVEL=INFO
+          LLM_ENABLED=${LLM_ENABLED:-true}
+          DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+          DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
+          DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+          POSITIONS=${POSITIONS:-[]}
+          WEB_SEARCH_ENABLED=${WEB_SEARCH_ENABLED:-false}
+          WEB_SEARCH_PROVIDER=tavily
+          WEB_SEARCH_API_KEY=${WEB_SEARCH_API_KEY}
+          STOCK_THEMES=${STOCK_THEMES:-GLP-1,司美格鲁肽,多肽原料药}
+          STOCK_BUSINESS=${STOCK_BUSINESS:-}
+          STOCK_PROFILES=${STOCK_PROFILES:-}
+          DINGTALK_REPORT_MODE=${DINGTALK_REPORT_MODE:-compact}
+          PRICE_MOVE_MIN_PCT=2.0
+          REPORT_WEB_ENABLED=false
+          SECTOR_PEER_WATCH=${SECTOR_PEER_WATCH:-}
+          EOF
+
+      - name: Window gate (Asia/Shanghai)
+        id: window
+        run: |
+          if [ "${{ github.event.inputs.ignore_window }}" = "true" ]; then
+            echo "in_window=true" >> "$GITHUB_OUTPUT"
+            echo "ignore_window flag set"
+            exit 0
+          fi
+          # 轻量前置：工作日 + 粗窗口；精细窗口由 main.py IsInNewsWatchWindow 再判
+          DOW=$(TZ=Asia/Shanghai date +%u)
+          HM=$(TZ=Asia/Shanghai date +%H%M)
+          if [ "$DOW" -ge 6 ]; then
+            echo "in_window=false" >> "$GITHUB_OUTPUT"
+            echo "weekend skip"
+            exit 0
+          fi
+          # 允许 09:00-11:30、13:00-15:00 进入（具体哨兵窗口在 Python）
+          if { [ "$HM" -ge 0900 ] && [ "$HM" -le 1130 ]; } || \
+             { [ "$HM" -ge 1300 ] && [ "$HM" -le 1500 ]; }; then
+            echo "in_window=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "in_window=false" >> "$GITHUB_OUTPUT"
+            echo "outside trading hours, skip"
+          fi
+
+      - name: Run news watch
+        if: steps.window.outputs.in_window == 'true'
+        run: |
+          GROUP="${{ matrix.group }}"
+          IGNORE=""
+          if [ "${{ github.event.inputs.ignore_window }}" = "true" ]; then
+            IGNORE="--ignore-watch-window"
+          fi
+          echo "Running news-watch group=$GROUP $IGNORE"
+          python main.py --news-watch --group "$GROUP" $IGNORE

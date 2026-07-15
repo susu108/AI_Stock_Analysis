@@ -179,18 +179,43 @@ def _NormalizeSearchResult(raw: dict[str, str], query: str) -> dict[str, str]:
 
 def BuildSearchQueries(stock_name: str, stock_code: str, themes: list[str]) -> list[str]:
     """构造并行搜索 query 列表。"""
+    from oil_short_playbook import IsOilShortGroup
+    from sector_catalyst_watch import ResolvePeerWatchList
+
     today = datetime.now()
     yesterday = (today - timedelta(days=1)).strftime("%m月%d日")
     queries: list[str] = [
         f"{stock_name} {stock_code} 上涨 原因 政策",
         f"{stock_name} 板块 资金 行情",
-        f"国家基药目录 医保 药监 最新 政策",
     ]
-    for theme in themes[:3]:
-        queries.append(f"{theme} 政策 A股 医药")
-    if yesterday:
+    if IsOilShortGroup():
+        queries.extend([
+            f"{yesterday} 原油 地缘",
+            "布伦特 WTI 油价",
+            f"{stock_name} 油气 短线",
+        ])
+    else:
+        queries.append("国家基药目录 医保 药监 最新 政策")
+        for theme in themes[:2]:
+            queries.append(f"{theme} 政策 A股 医药")
+        queries.append(f"{yesterday} 创新药 板块 大涨")
+        queries.append(f"{yesterday} 海外授权 医药")
+        peers = ResolvePeerWatchList()[:2]
+        for peer in peers:
+            queries.append(f"{peer} 授权 BD")
+    if yesterday and not IsOilShortGroup():
         queries.append(f"{stock_name} {yesterday} 大涨 原因")
-    return queries[:5]
+    # 去重保序，上限 6
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for q in queries:
+        if q in seen:
+            continue
+        seen.add(q)
+        deduped.append(q)
+        if len(deduped) >= 6:
+            break
+    return deduped
 
 
 def _DedupeResults(items: list[dict[str, str]]) -> list[dict[str, str]]:

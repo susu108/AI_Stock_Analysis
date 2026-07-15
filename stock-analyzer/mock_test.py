@@ -723,6 +723,104 @@ def RunOilShortPlayReportTest() -> bool:
         config.STOCK_MARKET = saved["market"]
 
 
+def RunCatalystNewsAndAlertTest() -> bool:
+    """迪哲授权类催化应被保留，并出现在 compact「板块催化」；门控可触发。"""
+    from news_alert_gate import EvaluateNewsAlert, IsInNewsWatchWindow, TryClaimNewsAlert
+    from sector_catalyst_watch import (
+        CollectCatalystBonus,
+        IsCatalystText,
+        MergeSectorWithCatalystBonus,
+        TagCatalystItems,
+    )
+    from dingtalk_pusher import BuildCompactDingTalkReportMarkdown
+    import pandas as pd
+
+    title = "7月14日晚间迪哲医药爆出6亿美元海外授权重磅大单"
+    catalyst_ok = IsCatalystText(title, "直接引爆创新药板块早盘集体高开")
+
+    fake_df = pd.DataFrame([
+        {"标题": title, "摘要": "创新药板块集体高开，哈药股份4连板", "发布时间": "2026-07-14 20:00", "链接": ""},
+        {"标题": "无关快讯足球比赛", "摘要": "NBA", "发布时间": "2026-07-14 21:00", "链接": ""},
+        *[
+            {"标题": f"普通医药情绪稿{i}", "摘要": "医药板块震荡", "发布时间": "2026-07-15 08:00", "链接": ""}
+            for i in range(20)
+        ],
+    ])
+    bonus = CollectCatalystBonus(fake_df, limit=6)
+    bonus_ok = any("迪哲" in str(i.get("title", "")) for i in bonus)
+
+    # 模拟普通 FilterSectorNews 只取前几条挤掉迪哲
+    sector_plain = [
+        {"title": f"普通医药情绪稿{i}", "content": "医药", "category": "sector"}
+        for i in range(16)
+    ]
+    merged = MergeSectorWithCatalystBonus(sector_plain, bonus)
+    merged = TagCatalystItems(merged)
+    keep_ok = any("迪哲" in str(i.get("title", "")) and i.get("is_catalyst") for i in merged)
+
+    news_bundle = {
+        "items": merged,
+        "relevant_items": [
+            {
+                "title": title,
+                "content": "海外授权",
+                "impact": "中性",
+                "directness": "indirect",
+                "category": "sector",
+                "is_catalyst": True,
+                "strength": 4,
+            },
+        ],
+        "news_score": 10.0,
+        "impact_stats": {"total": 1, "by_category": {"sector": 1}},
+    }
+    verdict = EvaluateNewsAlert(news_bundle, 10.0)
+    gate_ok = bool(verdict.get("worthy")) and "迪哲" in str(verdict.get("headline", ""))
+
+    # 去重：第二次同标题应拒绝
+    uniq = f"test-dizhe-{datetime.now().timestamp()}"
+    claim1 = TryClaimNewsAlert("301075", uniq)
+    claim2 = TryClaimNewsAlert("301075", uniq)
+    dedup_ok = claim1 and not claim2
+
+    # compact 报告含板块催化
+    saved_llm = config.LLM_ENABLED
+    config.LLM_ENABLED = False
+    try:
+        data = {
+            "realtime": BuildMockRealtime(),
+            "kline": BuildMockKline(),
+            "concept": BuildMockConceptBoards(),
+            "industry": BuildMockIndustryBoards(),
+            "fund_flow": BuildMockFundFlow(),
+        }
+        analysis = AnalyzeAll(data)
+        advice = GenerateAdvice(analysis, data, news_items=[], news_bundle=news_bundle, session_label="盘中")
+        advice["news_bundle"] = news_bundle
+        report = BuildCompactDingTalkReportMarkdown(data, analysis, advice, session_label="盘中")
+        display_ok = "板块催化" in report or "迪哲" in report
+    finally:
+        config.LLM_ENABLED = saved_llm
+
+    window_fn_ok = callable(IsInNewsWatchWindow)
+
+    # 石油催化不与药企名单混淆
+    saved_group = config.STOCK_GROUP
+    try:
+        config.STOCK_GROUP = "oil_short"
+        oil_cat = IsCatalystText("布伦特原油大跌", "地缘缓和")
+        pharma_on_oil = IsCatalystText("迪哲医药海外授权", "")
+        # oil group uses oil pattern; 迪哲不一定命中油气词
+        oil_branch_ok = oil_cat and not pharma_on_oil
+    finally:
+        config.STOCK_GROUP = saved_group
+
+    return all([
+        catalyst_ok, bonus_ok, keep_ok, gate_ok, dedup_ok,
+        display_ok, window_fn_ok, oil_branch_ok,
+    ])
+
+
 def RunThemeMismatchTest() -> bool:
     """验证板块/政策 GLP-1 资讯不会被误标为个股利好。"""
     saved_themes = list(config.STOCK_THEMES)
@@ -1019,6 +1117,9 @@ def RunMockTest() -> None:
     oil_short_play_ok = RunOilShortPlayReportTest()
     print(f"石油短线实操报告: {'通过' if oil_short_play_ok else '失败'}")
 
+    catalyst_alert_ok = RunCatalystNewsAndAlertTest()
+    print(f"板块催化与资讯门控: {'通过' if catalyst_alert_ok else '失败'}")
+
     news_judge_ok = (
         "资讯研判" in report
         and "个股直接利好" in report
@@ -1039,7 +1140,7 @@ def RunMockTest() -> None:
         or not kline_merge_ok or not tail_horizon_ok
         or not theme_mismatch_ok or not trading_day_date_ok
         or not multi_stock_ok or not oil_group_ok
-        or not oil_short_play_ok or not news_judge_ok
+        or not oil_short_play_ok or not catalyst_alert_ok or not news_judge_ok
     ):
         raise SystemExit(1)
 

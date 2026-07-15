@@ -22,12 +22,15 @@ F = TypeVar("F", bound=Callable[..., Any])
 _CONTENT_MAX_LEN = 300
 _CONTENT_MAX_LEN_POLICY = 600
 _STOCK_LIMIT = 10
-_SECTOR_LIMIT = 8
+_SECTOR_LIMIT = 16
 _POLICY_LIMIT = 10
 _MACRO_LIMIT = 5
 _CCTV_LOOKBACK_DAYS = 3
 
-_DEFAULT_SECTOR_KEYWORDS = ("医药", "医疗", "生物", "制药", "创新药", "疫苗", "医疗器械")
+_DEFAULT_SECTOR_KEYWORDS = (
+    "医药", "医疗", "生物", "制药", "创新药", "疫苗", "医疗器械",
+    "授权", "BD", "海外授权", "多肽", "减肥药", "原料药", "连板", "涨停潮",
+)
 _POLICY_KEYWORDS = (
     "政策", "国务院", "央行", "证监会", "医保", "药监", "监管",
     "发展改革", "财政", "关税", "降息", "降准", "集采", "带量采购",
@@ -92,7 +95,10 @@ def _MakeNewsItem(
 
 def ExtractSectorKeywords(data: dict[str, Any] | None) -> list[str]:
     """从板块数据与默认关键词提取板块检索词。"""
+    from sector_catalyst_watch import ExtraSectorKeywords
+
     keywords: set[str] = set(_DEFAULT_SECTOR_KEYWORDS)
+    keywords.update(ExtraSectorKeywords())
 
     if data:
         for board_key in ("concept", "industry"):
@@ -377,12 +383,21 @@ def FetchNews(data: dict[str, Any] | None = None) -> dict[str, Any]:
 
     stock_items = NormalizeStockNews(stock_df)
     sector_items = FilterSectorNews(global_df, sector_keywords, _SECTOR_LIMIT)
+    from sector_catalyst_watch import (
+        CollectCatalystBonus,
+        MergeSectorWithCatalystBonus,
+        TagCatalystItems,
+    )
+    catalyst_bonus = CollectCatalystBonus(global_df)
+    sector_items = MergeSectorWithCatalystBonus(sector_items, catalyst_bonus)
+    sector_items = TagCatalystItems(sector_items)
     policy_items = FilterPolicyNews(cctv_df, global_df, _POLICY_LIMIT)
     macro_items = NormalizeMacroEvents(macro_df, _MACRO_LIMIT)
 
     web_search_items: list[dict[str, str]] = []
     try:
         web_search_items = SearchPolicyAndThemeNews()
+        web_search_items = TagCatalystItems(web_search_items)
     except Exception as exc:
         logger.warning("联网搜索资讯采集异常: %s", exc)
 
@@ -398,6 +413,8 @@ def FetchNews(data: dict[str, Any] | None = None) -> dict[str, Any]:
             logger.warning("资讯类别 %s 本次未采集到数据", cat)
 
     all_items = stock_items + sector_items + policy_items + macro_items + web_search_items
+    all_items = TagCatalystItems(all_items)
+    catalyst_count = sum(1 for i in all_items if i.get("is_catalyst"))
     bundle: dict[str, Any] = {
         "items": all_items,
         "stock": stock_items,
@@ -409,17 +426,20 @@ def FetchNews(data: dict[str, Any] | None = None) -> dict[str, Any]:
         "sector_snapshot": sector_snapshot,
         "fetched_at": fetched_at,
         "category_counts": {k: len(v) for k, v in categories.items()},
+        "catalyst_count": catalyst_count,
         "is_realtime": True,
     }
 
     counts = bundle["category_counts"]
     logger.info(
-        "实时资讯采集完成 — 个股:%d 板块:%d 政策:%d 宏观:%d 联网:%d 合计:%d ｜ %s",
+        "实时资讯采集完成 — 个股:%d 板块:%d 政策:%d 宏观:%d 联网:%d "
+        "催化:%d 合计:%d ｜ %s",
         counts.get("stock", 0),
         counts.get("sector", 0),
         counts.get("policy", 0),
         counts.get("macro", 0),
         counts.get("web_search", 0),
+        catalyst_count,
         len(all_items),
         fetched_at,
     )

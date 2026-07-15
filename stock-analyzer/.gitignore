@@ -1,6 +1,7 @@
 .env
 .scheduler.lock
 .push_dedup.json
+.news_alert_dedup.json
 __pycache__/
 *.py[cod]
 *.log
