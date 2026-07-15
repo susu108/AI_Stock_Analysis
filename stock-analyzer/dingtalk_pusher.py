@@ -27,6 +27,37 @@ from utils import (
 
 logger = SetupLogger(config.LOG_LEVEL)
 
+NEWS_WATCH_LABEL = "资讯速报"
+NEWS_WATCH_ALERT_TAG = "【新资讯·影响预警】"
+
+
+def IsNewsWatchSession(session_label: str | None) -> bool:
+    """是否为资讯哨兵推送时段标签。"""
+    return NEWS_WATCH_LABEL in str(session_label or "")
+
+
+def BuildPushReportTitle(session_label: str = "盘中") -> str:
+    """组装钉钉消息 title（哨兵与定时不同）。"""
+    prefix = _ReportTitlePrefix()
+    name = config.STOCK_NAME
+    code = config.STOCK_CODE
+    if IsNewsWatchSession(session_label):
+        return f"{prefix}{NEWS_WATCH_ALERT_TAG}{name}({code})"
+    return f"{prefix}{name}({code}) {session_label}分析报告"
+
+
+def _ReportHeaderTitleLines(session_label: str) -> list[str]:
+    """报告 H1/H2：哨兵用影响预警文案，定时保持原样。"""
+    if IsNewsWatchSession(session_label):
+        return [
+            f"# {NEWS_WATCH_ALERT_TAG}{config.STOCK_NAME}",
+            f"## {config.STOCK_CODE}｜有新资讯可能影响个股，请结合下方研判",
+        ]
+    return [
+        f"# 📊 {config.STOCK_NAME}",
+        f"## {config.STOCK_CODE} 分析报告",
+    ]
+
 
 def BuildSignedUrl(webhook: str, secret: str) -> str:
     """生成带加签参数的 Webhook URL。"""
@@ -1269,8 +1300,7 @@ def _BuildReportHeaderSection(
 ) -> list[str]:
     """构建报告顶部速览（大标题分行，适配钉钉 Markdown 换行）。"""
     lines: list[str] = [
-        f"# 📊 {config.STOCK_NAME}",
-        f"## {config.STOCK_CODE} 分析报告",
+        *_ReportHeaderTitleLines(session_label),
         "",
         f"**{session_label}** ｜ {NowStr()}",
         "",
@@ -1549,8 +1579,7 @@ def _BuildCompactHeaderSection(
 ) -> list[str]:
     """构建精简版结论速览。"""
     lines: list[str] = [
-        f"# 📊 {config.STOCK_NAME}",
-        f"## {config.STOCK_CODE} 分析报告",
+        *_ReportHeaderTitleLines(session_label),
         "",
         f"**{session_label}** ｜ {NowStr()}",
         "",
@@ -2416,10 +2445,7 @@ def PushReport(
     push_time: str | None = None,
 ) -> bool:
     """生成并推送完整分析报告到钉钉。"""
-    title = (
-        f"{_ReportTitlePrefix()}{config.STOCK_NAME}({config.STOCK_CODE}) "
-        f"{session_label}分析报告"
-    )
+    title = BuildPushReportTitle(session_label)
     text = BuildDingTalkReportMarkdown(
         data, analysis, advice, session_label, report_mode,
     )

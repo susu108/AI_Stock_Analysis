@@ -13,7 +13,7 @@ import config
 from advisor import GenerateAdvice
 from analyzer import AnalyzeAll, MergeNewsIntoAnalysis
 from data_fetcher import FetchAllData
-from dingtalk_pusher import PushErrorNotice, PushPortfolioReport, PushReport
+from dingtalk_pusher import NEWS_WATCH_LABEL, PushErrorNotice, PushPortfolioReport, PushReport
 from market_context import ResolveSessionAndHorizon
 from news_analyzer import AnalyzeNewsImpact
 from news_fetcher import FetchNews, FlattenNewsItems
@@ -280,7 +280,9 @@ def JobNewsWatch(
                 headline = str(verdict.get("headline") or "").strip()
                 if not headline:
                     items = news_bundle.get("items") or []
-                    headline = str(items[0].get("title", "")) if items else "资讯速报"
+                    headline = (
+                        str(items[0].get("title", "")) if items else NEWS_WATCH_LABEL
+                    )
                 if not TryClaimNewsAlert(code, headline):
                     continue
                 logger.info(
@@ -290,7 +292,7 @@ def JobNewsWatch(
                     verdict.get("reason"),
                 )
                 _JobForCurrentProfile(
-                    session_label="资讯速报",
+                    session_label=NEWS_WATCH_LABEL,
                     force_run=True,
                 )
                 pushed += 1

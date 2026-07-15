@@ -859,6 +859,63 @@ def RunCatalystNewsAndAlertTest() -> bool:
     ])
 
 
+def RunNewsWatchTitleTest() -> bool:
+    """哨兵推送标题含影响预警；定时报告不含。"""
+    from dingtalk_pusher import (
+        BuildCompactDingTalkReportMarkdown,
+        BuildPushReportTitle,
+        NEWS_WATCH_ALERT_TAG,
+        NEWS_WATCH_LABEL,
+    )
+
+    saved_llm = config.LLM_ENABLED
+    saved_label = config.STOCK_GROUP_LABEL
+    config.LLM_ENABLED = False
+    try:
+        data = {
+            "realtime": BuildMockRealtime(),
+            "kline": BuildMockKline(),
+            "concept": BuildMockConceptBoards(),
+            "industry": BuildMockIndustryBoards(),
+            "fund_flow": BuildMockFundFlow(),
+        }
+        analysis = AnalyzeAll(data)
+        advice = GenerateAdvice(analysis, data, news_items=[], session_label="盘中")
+
+        watch_report = BuildCompactDingTalkReportMarkdown(
+            data, analysis, advice, session_label=NEWS_WATCH_LABEL,
+        )
+        daily_report = BuildCompactDingTalkReportMarkdown(
+            data, analysis, advice, session_label="开盘前",
+        )
+        watch_ok = (
+            NEWS_WATCH_ALERT_TAG in watch_report
+            and "可能影响个股" in watch_report
+        )
+        daily_ok = NEWS_WATCH_ALERT_TAG not in daily_report
+
+        title_pharma = BuildPushReportTitle(NEWS_WATCH_LABEL)
+        title_daily = BuildPushReportTitle("午盘")
+        title_ok = (
+            NEWS_WATCH_ALERT_TAG in title_pharma
+            and "分析报告" not in title_pharma
+            and NEWS_WATCH_ALERT_TAG not in title_daily
+            and "午盘分析报告" in title_daily
+        )
+
+        config.STOCK_GROUP_LABEL = "石油板块短线"
+        title_oil = BuildPushReportTitle(NEWS_WATCH_LABEL)
+        oil_ok = (
+            title_oil.startswith("石油板块短线｜")
+            and NEWS_WATCH_ALERT_TAG in title_oil
+        )
+        config.STOCK_GROUP_LABEL = saved_label
+        return watch_ok and daily_ok and title_ok and oil_ok
+    finally:
+        config.LLM_ENABLED = saved_llm
+        config.STOCK_GROUP_LABEL = saved_label
+
+
 def RunThemeMismatchTest() -> bool:
     """验证板块/政策 GLP-1 资讯不会被误标为个股利好。"""
     saved_themes = list(config.STOCK_THEMES)
@@ -1158,6 +1215,9 @@ def RunMockTest() -> None:
     catalyst_alert_ok = RunCatalystNewsAndAlertTest()
     print(f"板块催化与资讯门控: {'通过' if catalyst_alert_ok else '失败'}")
 
+    news_watch_title_ok = RunNewsWatchTitleTest()
+    print(f"资讯哨兵标题区分: {'通过' if news_watch_title_ok else '失败'}")
+
     news_judge_ok = (
         "资讯研判" in report
         and "个股直接利好" in report
@@ -1178,7 +1238,8 @@ def RunMockTest() -> None:
         or not kline_merge_ok or not tail_horizon_ok
         or not theme_mismatch_ok or not trading_day_date_ok
         or not multi_stock_ok or not oil_group_ok
-        or not oil_short_play_ok or not catalyst_alert_ok or not news_judge_ok
+        or not oil_short_play_ok or not catalyst_alert_ok
+        or not news_watch_title_ok or not news_judge_ok
     ):
         raise SystemExit(1)
 
