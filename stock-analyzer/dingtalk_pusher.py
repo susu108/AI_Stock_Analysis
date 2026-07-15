@@ -178,6 +178,43 @@ def _IsDirectCatalystItem(item: dict[str, Any]) -> bool:
         return False
 
 
+def _FormatItemPublishTime(item: dict[str, Any] | None) -> str:
+    """从资讯条目提取并格式化发布时间；无有效时间返回空串。"""
+    if not item:
+        return ""
+    raw = str(
+        item.get("time") or item.get("pub_time") or item.get("发布时间") or ""
+    ).strip()
+    return _FormatNewsTime(raw)
+
+
+def _ResolveCatalystPublishTime(advice: dict[str, Any]) -> str:
+    """解析触发资讯发布时间：优先 catalyst_llm.trigger_time，否则按标题反查。"""
+    news_bundle = advice.get("news_bundle") or {}
+    llm = news_bundle.get("catalyst_llm") or {}
+    trigger_time = _FormatNewsTime(str(llm.get("trigger_time", "")).strip())
+    if trigger_time:
+        return trigger_time
+    trigger_title = str(llm.get("trigger_title", "")).strip()
+    pools = (
+        list(news_bundle.get("relevant_items") or []),
+        list(news_bundle.get("items") or []),
+        list(news_bundle.get("scored_items") or []),
+    )
+    for pool in pools:
+        for item in pool:
+            title = str(item.get("title", ""))
+            if trigger_title and (trigger_title in title or title in trigger_title):
+                formatted = _FormatItemPublishTime(item)
+                if formatted:
+                    return formatted
+            if item.get("is_catalyst"):
+                formatted = _FormatItemPublishTime(item)
+                if formatted:
+                    return formatted
+    return ""
+
+
 def _HighlightSameDayCatalystLine(
     label: str,
     text: str,
@@ -185,11 +222,13 @@ def _HighlightSameDayCatalystLine(
     impact: str = "",
     same_day: bool = False,
     max_len: int = 80,
+    time_str: str = "",
 ) -> str:
     """当日直接催化用彩色高亮；非当日保持普通样式。"""
     body = _TruncateText(text, max_len)
+    time_part = f"`{time_str}` " if time_str else ""
     if not same_day:
-        return f"- **{label}** {body}"
+        return f"- **{label}** {time_part}{body}"
     tone = impact
     if not tone:
         if "利空" in label:
@@ -199,20 +238,24 @@ def _HighlightSameDayCatalystLine(
     if tone == "跌":
         return (
             f'- <font color="#43A047">**【当日催化·{label}】** '
-            f"**{body}**</font>"
+            f"{time_part}**{body}**</font>"
         )
     if tone == "涨":
         return (
             f'- <font color="#E53935">**【当日催化·{label}】** '
-            f"**{body}**</font>"
+            f"{time_part}**{body}**</font>"
         )
     return (
         f'- <font color="#FF6D00">**【当日催化·{label}】** '
-        f"**{body}**</font>"
+        f"{time_part}**{body}**</font>"
     )
 
 
-def _FormatCatalystLlmBlock(advice: dict[str, Any]) -> list[str]:
+def _FormatCatalystLlmBlock(
+    advice: dict[str, Any],
+    *,
+    include_publish_time: bool = True,
+) -> list[str]:
     """资讯哨兵：展示 AI 催化专项解读块。"""
     news_bundle = advice.get("news_bundle") or {}
     llm = news_bundle.get("catalyst_llm") or {}
@@ -221,7 +264,15 @@ def _FormatCatalystLlmBlock(advice: dict[str, Any]) -> list[str]:
         return []
     impact = str(llm.get("impact_on_stock", "中性")).strip()
     hint = str(llm.get("action_hint", "")).strip()
-    lines = [f"- **AI催化解读** {_TruncateText(summary, 120)}"]
+    trigger_title = str(llm.get("trigger_title", "")).strip()
+    publish_time = _ResolveCatalystPublishTime(advice) if include_publish_time else ""
+
+    lines: list[str] = []
+    if publish_time:
+        lines.append(f"- **发布时间** `{publish_time}`")
+    if trigger_title:
+        lines.append(f"- **触发资讯** {_TruncateText(trigger_title, 60)}")
+    lines.append(f"- **AI催化解读** {_TruncateText(summary, 120)}")
     if impact or hint:
         parts = []
         if impact:
@@ -271,19 +322,21 @@ def _FormatSameDayDirectBanner(advice: dict[str, Any]) -> str:
     if not reason:
         return ""
     short = _TruncateText(reason, 56)
+    time_tag = _FormatItemPublishTime(item)
+    time_prefix = f"{time_tag}｜" if time_tag else ""
     if impact == "跌":
         return (
             f'<font color="#43A047">**【当日直接催化·利空】** '
-            f"{short}</font>"
+            f"{time_prefix}{short}</font>"
         )
     if impact == "涨":
         return (
             f'<font color="#E53935">**【当日直接催化·利好】** '
-            f"{short}</font>"
+            f"{time_prefix}{short}</font>"
         )
     return (
         f'<font color="#FF6D00">**【当日直接催化】** '
-        f"{short}</font>"
+        f"{time_prefix}{short}</font>"
     )
 
 
@@ -614,6 +667,7 @@ def _BuildNewsBriefSection(
                 reason,
                 impact="涨",
                 same_day=_IsSameDayNews(item),
+                time_str=_FormatItemPublishTime(item),
             ))
     if direct_bearish:
         item = direct_bearish[0]
@@ -624,6 +678,7 @@ def _BuildNewsBriefSection(
                 reason,
                 impact="跌",
                 same_day=_IsSameDayNews(item),
+                time_str=_FormatItemPublishTime(item),
             ))
     if indirect_items:
         covered: list[str] = [
@@ -1635,7 +1690,12 @@ def _BuildCompactHeaderSection(
         f"**{session_label}** ｜ {NowStr()}",
     ]
     if IsNewsWatchSession(session_label):
-        catalyst_lines = _FormatCatalystLlmBlock(advice)
+        publish_time = _ResolveCatalystPublishTime(advice)
+        if publish_time:
+            lines.extend(["", f"**资讯发布** `{publish_time}`"])
+        catalyst_lines = _FormatCatalystLlmBlock(
+            advice, include_publish_time=False,
+        )
         if catalyst_lines:
             lines.extend(["", *catalyst_lines])
     lines.extend([
@@ -1687,9 +1747,29 @@ def _FormatOilNewsAlertBanner(advice: dict[str, Any]) -> str:
         return ""
     score = alert.get("score", 0)
     headline = str(alert.get("headline", "")).strip() or "地缘/原油相关资讯"
+    news_bundle = advice.get("news_bundle") or {}
+    time_tag = ""
+    for item in (
+        list(news_bundle.get("relevant_items") or [])
+        + list(news_bundle.get("items") or [])
+    ):
+        title = str(item.get("title", ""))
+        if headline in title or title in headline:
+            time_tag = _FormatItemPublishTime(item)
+            if time_tag:
+                break
+    if not time_tag:
+        time_tag = _ResolveCatalystPublishTime(advice)
+    time_prefix = f"`{time_tag}` " if time_tag else ""
     if level == "strong_bear":
-        return f"**【强烈利空】** {_TruncateText(headline, 60)}（打分 {score}）"
-    return f"**【强烈利好】** {_TruncateText(headline, 60)}（打分 +{abs(int(score))}）"
+        return (
+            f"**【强烈利空】** {time_prefix}"
+            f"{_TruncateText(headline, 60)}（打分 {score}）"
+        )
+    return (
+        f"**【强烈利好】** {time_prefix}"
+        f"{_TruncateText(headline, 60)}（打分 +{abs(int(score))}）"
+    )
 
 
 def _BuildCompactNewsSection(
@@ -1785,6 +1865,7 @@ def _BuildCompactNewsSection(
                 reason,
                 impact="涨",
                 same_day=_IsSameDayNews(item),
+                time_str=_FormatItemPublishTime(item),
             ))
             covered_texts.append(reason)
     for item in direct_bearish[:1]:
@@ -1795,6 +1876,7 @@ def _BuildCompactNewsSection(
                 reason,
                 impact="跌",
                 same_day=_IsSameDayNews(item),
+                time_str=_FormatItemPublishTime(item),
             ))
             covered_texts.append(reason)
     for item in _SelectUniqueNewsHighlights(catalyst_items, 2, covered_texts):
@@ -1805,6 +1887,7 @@ def _BuildCompactNewsSection(
             reason,
             impact=impact if impact in ("涨", "跌") else "",
             same_day=_IsSameDayNews(item),
+            time_str=_FormatItemPublishTime(item),
         ))
         covered_texts.append(reason)
     for item in _SelectUniqueNewsHighlights(indirect_items, 2, covered_texts):

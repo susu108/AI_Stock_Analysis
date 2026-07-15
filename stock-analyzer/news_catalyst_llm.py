@@ -151,6 +151,9 @@ def EnrichCatalystWithLlm(
         news_bundle["catalyst_llm"] = {
             **result,
             "trigger_title": str(item.get("title", ""))[:80],
+            "trigger_time": str(
+                item.get("time") or item.get("pub_time") or ""
+            )[:19],
         }
         logger.info(
             "催化 AI 解读完成 — %s 影响:%s",

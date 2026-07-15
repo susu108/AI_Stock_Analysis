@@ -779,10 +779,12 @@ def RunCatalystNewsAndAlertTest() -> bool:
         "news_score": 10.0,
         "impact_stats": {"total": 1, "by_category": {"sector": 1}},
     }
-    # items 列表里的催化条目也补时间，供 _StrongCatalystHits 扫描
+    # items 列表里的催化条目强制用近时时间，避免 bonus 的「昨晚」刚好卡在 18h 边界外
+    fresh_ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     for it in news_bundle["items"]:
-        if it.get("is_catalyst") and not it.get("time"):
-            it["time"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        if it.get("is_catalyst"):
+            it["time"] = fresh_ts
+    news_bundle["relevant_items"][0]["time"] = fresh_ts
     verdict = EvaluateNewsAlert(news_bundle, 10.0)
     gate_ok = bool(verdict.get("worthy")) and "迪哲" in str(verdict.get("headline", ""))
 
@@ -1012,10 +1014,11 @@ def RunNewsFreshnessAndDedupTest() -> bool:
 
 
 def RunCatalystLlmDisplayTest() -> bool:
-    """哨兵报告展示 AI 催化解读；规则兜底不含占位语。"""
+    """哨兵报告展示 AI 催化解读、发布时间；规则兜底不含占位语。"""
     from dingtalk_pusher import (
         BuildCompactDingTalkReportMarkdown,
         NEWS_WATCH_LABEL,
+        _FormatNewsTime,
         _ItemDisplayReason,
     )
     from news_analyzer import _ApplyRuleFallback, _RuleFallbackImpactReason
@@ -1032,6 +1035,8 @@ def RunCatalystLlmDisplayTest() -> bool:
         }
         analysis = AnalyzeAll(data)
 
+        publish_raw = "2026-07-14 20:00"
+        publish_short = _FormatNewsTime(publish_raw)
         catalyst_item = {
             "title": "迪哲医药6亿美元海外授权大单引爆创新药板块",
             "content": "创新药板块集体高开",
@@ -1041,6 +1046,7 @@ def RunCatalystLlmDisplayTest() -> bool:
             "is_catalyst": True,
             "strength": 4,
             "impact_reason": "板块情绪传导，对本公司间接影响",
+            "time": publish_raw,
         }
         news_bundle = {
             "relevant_items": [catalyst_item],
@@ -1055,6 +1061,7 @@ def RunCatalystLlmDisplayTest() -> bool:
                 "impact_on_stock": "涨",
                 "action_hint": "板块情绪利好，勿当个股直接订单",
                 "trigger_title": catalyst_item["title"][:40],
+                "trigger_time": publish_raw,
             },
         }
         advice = GenerateAdvice(
@@ -1070,6 +1077,11 @@ def RunCatalystLlmDisplayTest() -> bool:
             and "对本股影响" in report
             and "操作建议" in report
             and "勿当个股直接订单" in report
+            and "资讯发布" in report
+            and "触发资讯" in report
+            and publish_short in report
+            and f"`{publish_short}`" in report
+            and ("板块催化" in report or "迪哲" in report)
         )
 
         rule_items = [
