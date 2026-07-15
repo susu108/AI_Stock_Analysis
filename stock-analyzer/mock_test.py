@@ -732,7 +732,11 @@ def RunCatalystNewsAndAlertTest() -> bool:
         MergeSectorWithCatalystBonus,
         TagCatalystItems,
     )
-    from dingtalk_pusher import BuildCompactDingTalkReportMarkdown
+    from dingtalk_pusher import (
+        BuildCompactDingTalkReportMarkdown,
+        _HighlightSameDayCatalystLine,
+        _IsSameDayNews,
+    )
     import pandas as pd
 
     title = "7月14日晚间迪哲医药爆出6亿美元海外授权重磅大单"
@@ -783,6 +787,28 @@ def RunCatalystNewsAndAlertTest() -> bool:
     claim2 = TryClaimNewsAlert("301075", uniq)
     dedup_ok = claim1 and not claim2
 
+    # 当日直接催化高亮
+    today_str = date.today().strftime("%Y-%m-%d")
+    same_day_item = {
+        "title": "多瑞生物：获临床批件",
+        "impact": "涨",
+        "directness": "direct",
+        "time": f"{today_str} 09:30",
+        "impact_reason": "获临床批件，直接利好本公司",
+        "category": "stock",
+    }
+    same_day_ok = _IsSameDayNews(same_day_item)
+    highlight_line = _HighlightSameDayCatalystLine(
+        "个股直接利好",
+        "获临床批件，直接利好本公司",
+        impact="涨",
+        same_day=True,
+    )
+    style_ok = (
+        "当日催化" in highlight_line
+        and 'font color="#E53935"' in highlight_line
+    )
+
     # compact 报告含板块催化
     saved_llm = config.LLM_ENABLED
     config.LLM_ENABLED = False
@@ -795,10 +821,22 @@ def RunCatalystNewsAndAlertTest() -> bool:
             "fund_flow": BuildMockFundFlow(),
         }
         analysis = AnalyzeAll(data)
-        advice = GenerateAdvice(analysis, data, news_items=[], news_bundle=news_bundle, session_label="盘中")
-        advice["news_bundle"] = news_bundle
-        report = BuildCompactDingTalkReportMarkdown(data, analysis, advice, session_label="盘中")
-        display_ok = "板块催化" in report or "迪哲" in report
+        news_bundle_today = {
+            **news_bundle,
+            "relevant_items": [same_day_item] + list(news_bundle.get("relevant_items") or []),
+        }
+        advice = GenerateAdvice(
+            analysis, data, news_items=[], news_bundle=news_bundle_today, session_label="盘中",
+        )
+        advice["news_bundle"] = news_bundle_today
+        report = BuildCompactDingTalkReportMarkdown(
+            data, analysis, advice, session_label="盘中",
+        )
+        display_ok = (
+            ("板块催化" in report or "迪哲" in report or "当日催化" in report)
+            and ("当日直接催化" in report or "当日催化" in report)
+            and 'font color="' in report
+        )
     finally:
         config.LLM_ENABLED = saved_llm
 
@@ -817,7 +855,7 @@ def RunCatalystNewsAndAlertTest() -> bool:
 
     return all([
         catalyst_ok, bonus_ok, keep_ok, gate_ok, dedup_ok,
-        display_ok, window_fn_ok, oil_branch_ok,
+        same_day_ok, style_ok, display_ok, window_fn_ok, oil_branch_ok,
     ])
 
 

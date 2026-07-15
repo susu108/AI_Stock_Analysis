@@ -8,6 +8,7 @@ import hmac
 import re
 import time
 import urllib.parse
+from datetime import date, datetime
 from typing import Any
 
 import requests
@@ -100,6 +101,125 @@ def _EmAction(action: str) -> str:
     if any(k in text for k in ("买", "加", "入")):
         return f'<font color="#E53935">**{text}**</font>'
     return f"**{text}**"
+
+
+def _ParseNewsItemDate(item: dict[str, Any]) -> date | None:
+    """从资讯 time 字段解析日期；仅时分秒则视为当日。"""
+    raw = str(item.get("time") or item.get("pub_time") or "").strip()
+    if not raw:
+        return None
+    if re.fullmatch(r"\d{1,2}:\d{2}(:\d{2})?", raw):
+        return date.today()
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) >= 8:
+        try:
+            return date(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
+        except ValueError:
+            return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw[:19], fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _IsSameDayNews(item: dict[str, Any], today: date | None = None) -> bool:
+    """是否为当日资讯（无日期时不标当日，避免误伤）。"""
+    parsed = _ParseNewsItemDate(item)
+    if parsed is None:
+        return False
+    return parsed == (today or date.today())
+
+
+def _IsDirectCatalystItem(item: dict[str, Any]) -> bool:
+    """个股直接或已打标催化剂。"""
+    if str(item.get("directness", "")) == "direct":
+        return True
+    if item.get("is_catalyst"):
+        return True
+    try:
+        from sector_catalyst_watch import IsCatalystText
+        return IsCatalystText(
+            str(item.get("title", "")), str(item.get("content", "")),
+        )
+    except Exception:
+        return False
+
+
+def _HighlightSameDayCatalystLine(
+    label: str,
+    text: str,
+    *,
+    impact: str = "",
+    same_day: bool = False,
+    max_len: int = 80,
+) -> str:
+    """当日直接催化用彩色高亮；非当日保持普通样式。"""
+    body = _TruncateText(text, max_len)
+    if not same_day:
+        return f"- **{label}** {body}"
+    tone = impact
+    if not tone:
+        if "利空" in label:
+            tone = "跌"
+        elif "利好" in label or "催化" in label:
+            tone = "涨"
+    if tone == "跌":
+        return (
+            f'- <font color="#43A047">**【当日催化·{label}】** '
+            f"**{body}**</font>"
+        )
+    if tone == "涨":
+        return (
+            f'- <font color="#E53935">**【当日催化·{label}】** '
+            f"**{body}**</font>"
+        )
+    return (
+        f'- <font color="#FF6D00">**【当日催化·{label}】** '
+        f"**{body}**</font>"
+    )
+
+
+def _FormatSameDayDirectBanner(advice: dict[str, Any]) -> str:
+    """结论区醒目横幅：当日个股直接涨/跌催化。"""
+    news_bundle = advice.get("news_bundle") or {}
+    items: list[dict[str, Any]] = list(
+        news_bundle.get("relevant_items")
+        or news_bundle.get("scored_items")
+        or []
+    )
+    today_direct = [
+        i for i in items
+        if _IsSameDayNews(i)
+        and str(i.get("directness", "")) == "direct"
+        and str(i.get("impact", "")) in ("涨", "跌")
+    ]
+    if not today_direct:
+        today_direct = [
+            i for i in items
+            if _IsSameDayNews(i) and _IsDirectCatalystItem(i)
+        ]
+    if not today_direct:
+        return ""
+    item = today_direct[0]
+    impact = str(item.get("impact", ""))
+    reason = _ItemDisplayReason(item) or str(item.get("title", ""))
+    short = _TruncateText(reason, 56)
+    if impact == "跌":
+        return (
+            f'<font color="#43A047">**【当日直接催化·利空】** '
+            f"{short}</font>"
+        )
+    if impact == "涨":
+        return (
+            f'<font color="#E53935">**【当日直接催化·利好】** '
+            f"{short}</font>"
+        )
+    return (
+        f'<font color="#FF6D00">**【当日直接催化】** '
+        f"{short}</font>"
+    )
 
 
 def _HighlightMetricsInText(text: str) -> str:
@@ -424,12 +544,22 @@ def _BuildNewsBriefSection(
         item = direct_bullish[0]
         reason = str(item.get("impact_reason") or item.get("title", "")).strip()
         if reason:
-            lines.append(f"- **个股直接利好** {_TruncateText(reason, 80)}")
+            lines.append(_HighlightSameDayCatalystLine(
+                "个股直接利好",
+                reason,
+                impact="涨",
+                same_day=_IsSameDayNews(item),
+            ))
     if direct_bearish:
         item = direct_bearish[0]
         reason = str(item.get("impact_reason") or item.get("title", "")).strip()
         if reason:
-            lines.append(f"- **个股直接利空** {_TruncateText(reason, 80)}")
+            lines.append(_HighlightSameDayCatalystLine(
+                "个股直接利空",
+                reason,
+                impact="跌",
+                same_day=_IsSameDayNews(item),
+            ))
     if indirect_items:
         covered: list[str] = [
             news_summary, policy_impact, sector_impact, theme_mismatch_note,
@@ -1440,6 +1570,9 @@ def _BuildCompactHeaderSection(
     banner = _FormatOilNewsAlertBanner(advice)
     if banner:
         lines.extend(["", banner])
+    same_day_banner = _FormatSameDayDirectBanner(advice)
+    if same_day_banner:
+        lines.extend(["", same_day_banner])
     if add_tier1.get("low") and add_tier1.get("high"):
         rec1 = ResolveTierRecommended(add_tier1, "buy")
         if rec1 > 0:
@@ -1526,6 +1659,9 @@ def _BuildCompactNewsSection(
     banner = _FormatOilNewsAlertBanner(advice)
     if banner:
         lines.append(f"- {banner}")
+    same_day_banner = _FormatSameDayDirectBanner(advice)
+    if same_day_banner:
+        lines.append(f"- {same_day_banner}")
     if stats:
         lines.append(
             f"- 采集 **{stats.get('total', 0)}** 条"
@@ -1552,16 +1688,32 @@ def _BuildCompactNewsSection(
     for item in direct_bullish[:1]:
         reason = _ItemDisplayReason(item)
         if reason and not _IsReasonCovered(reason, covered_texts):
-            lines.append(f"- **个股直接利好** {_TruncateText(reason, 80)}")
+            lines.append(_HighlightSameDayCatalystLine(
+                "个股直接利好",
+                reason,
+                impact="涨",
+                same_day=_IsSameDayNews(item),
+            ))
             covered_texts.append(reason)
     for item in direct_bearish[:1]:
         reason = _ItemDisplayReason(item)
         if reason and not _IsReasonCovered(reason, covered_texts):
-            lines.append(f"- **个股直接利空** {_TruncateText(reason, 80)}")
+            lines.append(_HighlightSameDayCatalystLine(
+                "个股直接利空",
+                reason,
+                impact="跌",
+                same_day=_IsSameDayNews(item),
+            ))
             covered_texts.append(reason)
     for item in _SelectUniqueNewsHighlights(catalyst_items, 2, covered_texts):
         reason = _ItemDisplayReason(item) or str(item.get("title", ""))
-        lines.append(f"- **板块催化** {_TruncateText(reason, 80)}")
+        impact = str(item.get("impact", ""))
+        lines.append(_HighlightSameDayCatalystLine(
+            "板块催化",
+            reason,
+            impact=impact if impact in ("涨", "跌") else "",
+            same_day=_IsSameDayNews(item),
+        ))
         covered_texts.append(reason)
     for item in _SelectUniqueNewsHighlights(indirect_items, 2, covered_texts):
         reason = _ItemDisplayReason(item)
