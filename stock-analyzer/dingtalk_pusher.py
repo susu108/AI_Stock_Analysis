@@ -235,7 +235,9 @@ def _FormatSameDayDirectBanner(advice: dict[str, Any]) -> str:
         return ""
     item = today_direct[0]
     impact = str(item.get("impact", ""))
-    reason = _ItemDisplayReason(item) or str(item.get("title", ""))
+    reason = _ItemDisplayReason(item)
+    if not reason:
+        return ""
     short = _TruncateText(reason, 56)
     if impact == "跌":
         return (
@@ -719,9 +721,26 @@ def _DedupeNewsItems(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+_PLACEHOLDER_IMPACT_REASONS = frozenset({
+    "规则兜底，建议启用 AI 获取精准影响",
+    "规则兜底，建议启用AI获取精准影响",
+})
+
+
 def _ItemDisplayReason(item: dict[str, Any]) -> str:
-    """提取资讯展示用说明文案。"""
-    return str(item.get("impact_reason") or item.get("title", "")).strip()
+    """提取资讯展示用说明文案：优先真实影响说明，占位语则回退到标题/摘要。"""
+    reason = str(item.get("impact_reason", "")).strip()
+    if reason and reason not in _PLACEHOLDER_IMPACT_REASONS:
+        # 仍含「规则兜底」的机械占位也不展示
+        if "规则兜底" not in reason and "建议启用 AI" not in reason:
+            return reason
+    title = str(item.get("title", "")).strip()
+    if title:
+        return title
+    content = str(item.get("content", "")).strip()
+    if content:
+        return content[:80]
+    return ""
 
 
 def _IsReasonCovered(reason: str, covered_texts: list[str]) -> bool:
