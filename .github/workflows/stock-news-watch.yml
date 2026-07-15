@@ -1,5 +1,6 @@
 # 资讯哨兵：交易时段拉取资讯，命中强催化后即时推送（与定时 09:00/11:30/14:30 并存）
-# 由 cron-job.org 每约 15 分钟 repository_dispatch type=stock-news-watch 触发
+# 由 cron-job.org 约每 2 小时 repository_dispatch type=stock-news-watch 触发
+# 建议 cron（Asia/Shanghai）：15 9,11,13 * * 1-5 → 09:15 / 11:15 / 13:15
 
 name: Stock News Watch
 
@@ -19,11 +20,16 @@ env:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   news-watch:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # 同群串行：避免重叠 run 都读到空去重文件而重复推送
+    concurrency:
+      group: stock-news-watch-${{ matrix.group }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
@@ -107,10 +113,21 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: stock-analyzer/.news_alert_dedup.json
-          key: news-alert-dedup-${{ matrix.group }}-${{ steps.date.outputs.day }}-${{ github.run_id }}
+          key: news-alert-dedup-${{ matrix.group }}-${{ steps.date.outputs.day }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             news-alert-dedup-${{ matrix.group }}-${{ steps.date.outputs.day }}-
             news-alert-dedup-${{ matrix.group }}-
+
+      - name: Log dedup cache status
+        run: |
+          echo "cache-hit=${{ steps.dedup-cache.outputs.cache-hit }}"
+          echo "cache-matched-key=${{ steps.dedup-cache.outputs.cache-matched-key }}"
+          if [ -f .news_alert_dedup.json ]; then
+            echo "dedup file bytes=$(wc -c < .news_alert_dedup.json)"
+            head -c 500 .news_alert_dedup.json || true
+          else
+            echo "dedup file missing after restore"
+          fi
 
       - name: Window gate (Asia/Shanghai)
         id: window
@@ -156,8 +173,8 @@ jobs:
           python main.py --news-watch --group "$GROUP" $IGNORE
 
       - name: Save news-alert dedup cache
-        if: steps.window.outputs.in_window == 'true'
+        if: steps.window.outputs.in_window == 'true' && always()
         uses: actions/cache/save@v4
         with:
           path: stock-analyzer/.news_alert_dedup.json
-          key: news-alert-dedup-${{ matrix.group }}-${{ steps.date.outputs.day }}-${{ github.run_id }}
+          key: news-alert-dedup-${{ matrix.group }}-${{ steps.date.outputs.day }}-${{ github.run_id }}-${{ github.run_attempt }}

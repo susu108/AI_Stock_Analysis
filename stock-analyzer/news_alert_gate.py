@@ -166,6 +166,16 @@ def BuildNewsAlertKey(group: str, title: str) -> str:
     return f"{day}:{group_id}:{digest}"
 
 
+def IsNewsAlertClaimed(title: str, group: str | None = None) -> bool:
+    """同监控组下该标题是否已认领（24h 内）。"""
+    if not title.strip():
+        return True
+    group_id = (group or config.STOCK_GROUP or "default").strip() or "default"
+    key = BuildNewsAlertKey(group_id, title)
+    state = _PruneAlertDedup(_LoadAlertDedup())
+    return key in state
+
+
 def TryClaimNewsAlert(title: str, group: str | None = None) -> bool:
     """认领一条资讯告警；同监控组、同归一化标题 24 小时内不可重复。"""
     if not title.strip():
@@ -182,7 +192,76 @@ def TryClaimNewsAlert(title: str, group: str | None = None) -> bool:
         return False
     state[key] = datetime.now().isoformat(timespec="seconds")
     _SaveAlertDedup(state)
+    logger.info(
+        "资讯告警已认领（群=%s）entries=%d: %s",
+        group_id,
+        len(state),
+        title[:40],
+    )
     return True
+
+
+def TryClaimNewsAlertBundle(
+    titles: list[str],
+    group: str | None = None,
+) -> bool:
+    """批量认领相关标题；任一已认领则整批拒绝（同事件多标题变体）。"""
+    cleaned = [t.strip() for t in titles if t and str(t).strip()]
+    if not cleaned:
+        return False
+    group_id = (group or config.STOCK_GROUP or "default").strip() or "default"
+    state = _PruneAlertDedup(_LoadAlertDedup())
+    keys = [BuildNewsAlertKey(group_id, t) for t in cleaned]
+    for key, title in zip(keys, cleaned):
+        if key in state:
+            logger.info(
+                "资讯告警去重命中（群=%s 批量），跳过: %s",
+                group_id,
+                title[:40],
+            )
+            return False
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    for key in keys:
+        state[key] = now_iso
+    _SaveAlertDedup(state)
+    logger.info(
+        "资讯告警已批量认领（群=%s）titles=%d entries=%d",
+        group_id,
+        len(keys),
+        len(state),
+    )
+    return True
+
+
+def CollectClaimTitles(
+    news_bundle: dict[str, Any],
+    headline: str,
+) -> list[str]:
+    """收集触发标题 + 新鲜催化/直接影响标题，用于同事件变体一并去重。"""
+    titles: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: str) -> None:
+        text = str(raw or "").strip()
+        if not text:
+            return
+        norm = NormalizeAlertTitle(text)
+        if not norm or norm in seen:
+            return
+        seen.add(norm)
+        titles.append(text)
+
+    _add(headline)
+    for item in _StrongCatalystHits(news_bundle):
+        _add(str(item.get("title", "")))
+    for item in _ImpactfulItems(news_bundle):
+        _add(str(item.get("title", "")))
+    return titles
+
+
+def AlertDedupEntryCount() -> int:
+    """当前本地去重条目数（运维日志用）。"""
+    return len(_PruneAlertDedup(_LoadAlertDedup()))
 
 
 def _FilterFresh(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

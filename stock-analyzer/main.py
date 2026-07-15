@@ -260,13 +260,16 @@ def JobNewsWatch(
 ) -> int:
     """资讯哨兵：组内逐股轻量拉资讯，过门控且未去重则 force 推送。"""
     from news_alert_gate import (
+        AlertDedupEntryCount,
+        CollectClaimTitles,
         EvaluateNewsAlert,
         IsInNewsWatchWindow,
-        TryClaimNewsAlert,
+        TryClaimNewsAlertBundle,
     )
 
     llm_status = "enabled" if IsLlmEnabled() else "disabled"
     logger.info("news-watch: LLM 资讯分析 %s", llm_status)
+    logger.info("news-watch: 本地去重条目=%d", AlertDedupEntryCount())
 
     if not ignore_window and not IsInNewsWatchWindow():
         logger.info("news-watch: 当前不在哨兵窗口，skip")
@@ -309,7 +312,8 @@ def JobNewsWatch(
                         str(items[0].get("title", "")) if items else NEWS_WATCH_LABEL
                     )
                 group_id = config.STOCK_GROUP or group or "default"
-                if not TryClaimNewsAlert(headline, group=group_id):
+                claim_titles = CollectClaimTitles(news_bundle, headline)
+                if not TryClaimNewsAlertBundle(claim_titles, group=group_id):
                     continue
                 news_bundle = EnrichCatalystWithLlm(
                     news_bundle, data, trigger_headline=headline,

@@ -989,12 +989,22 @@ def RunNewsFreshnessAndDedupTest() -> bool:
     claim3 = TryClaimNewsAlert(f"{base}。", group="pharma")
     dedup_norm_ok = claim1 and not claim2 and not claim3
 
-    # 同标题不同群可各推一次；同群第二次拒绝
+    # 同标题不同群可各推一次；同群第二次拒绝；批量认领同事件变体
     cross = f"跨群去重校验{suffix}"
     cross_pharma = TryClaimNewsAlert(cross, group="pharma")
     cross_oil = TryClaimNewsAlert(cross, group="oil_short")
     cross_pharma2 = TryClaimNewsAlert(cross, group="pharma")
     cross_group_ok = cross_pharma and cross_oil and not cross_pharma2
+
+    from news_alert_gate import TryClaimNewsAlertBundle
+    bundle_base = f"批量认领校验{suffix}"
+    bundle1 = TryClaimNewsAlertBundle(
+        [f"{bundle_base}甲", f"{bundle_base}乙"], group="pharma",
+    )
+    bundle2 = TryClaimNewsAlertBundle(
+        [f"{bundle_base}乙变体", f"{bundle_base}乙"], group="pharma",
+    )
+    bundle_ok = bundle1 and not bundle2
 
     stale_direct = {
         "title": "公司获得药品注册证书",
@@ -1016,7 +1026,7 @@ def RunNewsFreshnessAndDedupTest() -> bool:
 
     return all([
         fresh_ok, stale_ok, no_time_ok, eval_ok,
-        norm_ok, dedup_norm_ok, cross_group_ok, stale_direct_ok,
+        norm_ok, dedup_norm_ok, cross_group_ok, bundle_ok, stale_direct_ok,
     ])
 
 
