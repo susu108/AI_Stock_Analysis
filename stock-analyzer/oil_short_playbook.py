@@ -60,6 +60,11 @@ def IsOilShortGroup() -> bool:
     return str(getattr(config, "STOCK_GROUP", "") or "").strip() == "oil_short"
 
 
+def IsNonferrousGroup() -> bool:
+    """当前 profile 是否为有色周期监控组。"""
+    return str(getattr(config, "STOCK_GROUP", "") or "").strip() == "nonferrous"
+
+
 def MaxPositionPctForStock(stock_code: str | None = None) -> float:
     """返回单只建议仓位上限（占账户资金 %）。"""
     code = (stock_code or config.STOCK_CODE or "").strip()

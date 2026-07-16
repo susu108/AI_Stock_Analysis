@@ -11,7 +11,7 @@ from typing import Any
 
 import config
 from oil_short_advisor import AggregateOilNewsAlert
-from oil_short_playbook import IsOilShortGroup
+from oil_short_playbook import IsNonferrousGroup, IsOilShortGroup
 from sector_catalyst_watch import IsCatalystText
 from utils import SetupLogger
 
@@ -28,6 +28,10 @@ _STRONG_PHARMA = (
 _STRONG_OIL = (
     "原油大跌", "原油大涨", "布伦特", "地缘冲突", "制裁",
     "通航", "和谈", "停火", "霍尔木兹", "OPEC",
+)
+_STRONG_NONFERROUS = (
+    "铝价大涨", "铝价大跌", "电解铝", "氧化铝", "有色板块",
+    "限电", "产能", "动力煤", "沪铝", "板块大涨",
 )
 
 
@@ -275,9 +279,16 @@ def _IsStrongCatalystItem(item: dict[str, Any]) -> bool:
     is_cat = bool(item.get("is_catalyst")) or IsCatalystText(title, content)
     if not is_cat:
         return False
-    strong_words = _STRONG_OIL if IsOilShortGroup() else _STRONG_PHARMA
+    if IsOilShortGroup():
+        strong_words = _STRONG_OIL
+    elif IsNonferrousGroup():
+        strong_words = _STRONG_NONFERROUS
+    else:
+        strong_words = _STRONG_PHARMA
     if any(w in text for w in strong_words) or item.get("is_catalyst"):
-        if IsOilShortGroup() or any(w in text for w in strong_words) or "授权" in text:
+        if IsOilShortGroup() or IsNonferrousGroup():
+            return True
+        if any(w in text for w in strong_words) or "授权" in text:
             return True
     return False
 

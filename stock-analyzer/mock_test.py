@@ -579,6 +579,80 @@ def RunOilGroupChannelTest() -> bool:
         config.STOCK_CODE = saved_code
 
 
+def RunNonferrousGroupTest() -> bool:
+    """有色组 profile、共用 default 通道、标题前缀与催化分支。"""
+    from dingtalk_pusher import BuildPushReportTitle
+    from oil_short_playbook import IsNonferrousGroup
+    from sector_catalyst_watch import IsCatalystText
+
+    saved_profiles_env = os.environ.get("STOCK_PROFILES")
+    saved_webhook = config.DINGTALK_WEBHOOK
+    saved_secret = config.DINGTALK_SECRET
+    saved_label = config.STOCK_GROUP_LABEL
+    saved_group = config.STOCK_GROUP
+    saved_code = config.STOCK_CODE
+    try:
+        config.DINGTALK_WEBHOOK = "https://hook.default/example"
+        config.DINGTALK_SECRET = "SECdefault"
+        os.environ["STOCK_PROFILES"] = (
+            '[{"code":"301075","name":"多瑞生物","market":"sz","themes":["GLP-1"],'
+            '"business":"药","positions":[],"channel":"default","group":"pharma"},'
+            '{"code":"000933","name":"神火股份","market":"sz","themes":["电解铝","煤炭"],'
+            '"business":"煤电铝","positions":[],"channel":"default","group":"nonferrous",'
+            '"group_label":"有色周期"},'
+            '{"code":"000807","name":"云铝股份","market":"sz","themes":["电解铝","有色"],'
+            '"business":"水电铝","positions":[],"channel":"default","group":"nonferrous",'
+            '"group_label":"有色周期"}]'
+        )
+        profiles = config.ResolveStockProfiles()
+        nf = FilterProfilesByGroup(profiles, "nonferrous")
+        pharma = FilterProfilesByGroup(profiles, "pharma")
+        group_ok = (
+            len(nf) == 2
+            and {p.get("code") for p in nf} == {"000933", "000807"}
+            and all(p.get("channel") == "default" for p in nf)
+            and all(p.get("group_label") == "有色周期" for p in nf)
+            and len(pharma) == 1
+        )
+
+        webhook, secret = config.ResolveDingtalkChannel("default")
+        channel_ok = (
+            webhook == "https://hook.default/example" and secret == "SECdefault"
+        )
+
+        with ApplyStockProfile(nf[0]):
+            switch_ok = (
+                config.STOCK_GROUP == "nonferrous"
+                and config.STOCK_GROUP_LABEL == "有色周期"
+                and config.STOCK_CHANNEL == "default"
+                and config.DINGTALK_WEBHOOK == "https://hook.default/example"
+                and IsNonferrousGroup()
+            )
+            title = BuildPushReportTitle("开盘前")
+            title_ok = title.startswith("有色周期｜") and "神火股份" in title
+            alum_ok = IsCatalystText("电解铝限电减产提振铝价", "")
+            pharma_on_nf = not IsCatalystText("迪哲医药海外授权重磅大单", "")
+
+        restore_ok = (
+            config.STOCK_GROUP == saved_group
+            and config.STOCK_GROUP_LABEL == saved_label
+            and config.STOCK_CODE == saved_code
+        )
+        return all([
+            group_ok, channel_ok, switch_ok, title_ok, alum_ok, pharma_on_nf, restore_ok,
+        ])
+    finally:
+        if saved_profiles_env is None:
+            os.environ.pop("STOCK_PROFILES", None)
+        else:
+            os.environ["STOCK_PROFILES"] = saved_profiles_env
+        config.DINGTALK_WEBHOOK = saved_webhook
+        config.DINGTALK_SECRET = saved_secret
+        config.STOCK_GROUP_LABEL = saved_label
+        config.STOCK_GROUP = saved_group
+        config.STOCK_CODE = saved_code
+
+
 def RunOilShortPlayReportTest() -> bool:
     """验证石油短线实操章、强讯横幅；医药报告不含石油风险头。"""
     from dingtalk_pusher import BuildCompactDingTalkReportMarkdown
@@ -1519,6 +1593,9 @@ def RunMockTest() -> None:
     oil_group_ok = RunOilGroupChannelTest()
     print(f"石油双群通道: {'通过' if oil_group_ok else '失败'}")
 
+    nonferrous_ok = RunNonferrousGroupTest()
+    print(f"有色板块双股: {'通过' if nonferrous_ok else '失败'}")
+
     oil_short_play_ok = RunOilShortPlayReportTest()
     print(f"石油短线实操报告: {'通过' if oil_short_play_ok else '失败'}")
 
@@ -1560,6 +1637,7 @@ def RunMockTest() -> None:
         or not kline_merge_ok or not tail_horizon_ok
         or not theme_mismatch_ok or not trading_day_date_ok
         or not multi_stock_ok or not oil_group_ok
+        or not nonferrous_ok
         or not oil_short_play_ok or not catalyst_alert_ok
         or not news_watch_title_ok or not fresh_dedup_ok
         or not news_watch_window_ok

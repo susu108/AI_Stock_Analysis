@@ -6,7 +6,7 @@ import os
 import re
 from typing import Any
 
-from oil_short_playbook import IsOilShortGroup
+from oil_short_playbook import IsNonferrousGroup, IsOilShortGroup
 
 CATALYST_BONUS_LIMIT = 6
 
@@ -33,9 +33,20 @@ _OIL_CATALYST_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_NONFERROUS_CATALYST_PATTERN = re.compile(
+    r"电解铝|氧化铝|铝价|有色|煤炭|动力煤|焦煤|"
+    r"限电|产能|水电铝|铝锭|沪铝|LME铝|有色板块",
+    re.IGNORECASE,
+)
+
 _DEFAULT_OIL_KEYWORDS = (
     "原油", "布伦特", "WTI", "OPEC", "中东", "伊朗", "海峡",
     "地缘", "油服", "页岩油", "油气", "石油",
+)
+
+_DEFAULT_NONFERROUS_KEYWORDS = (
+    "电解铝", "氧化铝", "铝价", "有色", "煤炭", "动力煤",
+    "限电", "产能", "水电铝", "沪铝",
 )
 
 _DEFAULT_PHARMA_SECTOR_EXTRA = (
@@ -49,7 +60,7 @@ def ResolvePeerWatchList() -> list[str]:
     raw = os.getenv("SECTOR_PEER_WATCH", "").strip()
     if raw:
         return [p.strip() for p in raw.split(",") if p.strip()]
-    if IsOilShortGroup():
+    if IsOilShortGroup() or IsNonferrousGroup():
         return []
     return list(_DEFAULT_PHARMA_PEERS)
 
@@ -58,6 +69,8 @@ def ExtraSectorKeywords() -> list[str]:
     """按组返回额外板块关键词。"""
     if IsOilShortGroup():
         return list(_DEFAULT_OIL_KEYWORDS)
+    if IsNonferrousGroup():
+        return list(_DEFAULT_NONFERROUS_KEYWORDS)
     return list(_DEFAULT_PHARMA_SECTOR_EXTRA)
 
 
@@ -66,6 +79,8 @@ def IsCatalystText(title: str, content: str = "") -> bool:
     text = f"{title} {content}"
     if IsOilShortGroup():
         return bool(_OIL_CATALYST_PATTERN.search(text))
+    if IsNonferrousGroup():
+        return bool(_NONFERROUS_CATALYST_PATTERN.search(text))
     peers = ResolvePeerWatchList()
     if any(p in text for p in peers):
         return True

@@ -16,7 +16,7 @@ from news_context import (
     ComputeStockVsSectorDivergence,
 )
 from oil_short_advisor import AggregateOilNewsAlert
-from oil_short_playbook import IsOilShortGroup
+from oil_short_playbook import IsNonferrousGroup, IsOilShortGroup
 from utils import SafeFloat, SetupLogger
 
 logger = SetupLogger(config.LOG_LEVEL)
@@ -36,18 +36,33 @@ _OIL_DOMAIN_HINT = (
 )
 
 
+_NONFERROUS_DOMAIN_HINT = (
+    "电解铝、氧化铝、铝价、有色、煤炭、动力煤、限电、产能、水电铝、沪铝"
+)
+
+
 def _DomainLabel() -> str:
-    return "石油/油气/A股" if IsOilShortGroup() else "医药/A股"
+    if IsOilShortGroup():
+        return "石油/油气/A股"
+    if IsNonferrousGroup():
+        return "有色/电解铝/A股"
+    return "医药/A股"
 
 
 def _BuildNewsScoringPrompt(stock_name: str, stock_code: str) -> str:
     domain = _DomainLabel()
-    oil_extra = ""
+    domain_extra = ""
     if IsOilShortGroup():
-        oil_extra = (
+        domain_extra = (
             f"相关域优先：{_OIL_DOMAIN_HINT}。"
             "地缘冲突升级/制裁/通航中断通常偏涨；和谈/缓和/原油大跌通常偏跌。"
             "弱化医药生物类过滤；炼化利润挤压且无上游联动时勿过度标涨。"
+        )
+    elif IsNonferrousGroup():
+        domain_extra = (
+            f"相关域优先：{_NONFERROUS_DOMAIN_HINT}。"
+            "铝价大涨/限电减产/有色板块普涨通常偏涨；铝价大跌/产能过剩通常偏跌。"
+            "弱化医药授权类过滤；煤炭价格仅当明确传导至电解铝成本时再标影响。"
         )
     return (
         f"你是 A 股资讯分析师。请评估每条资讯对 {stock_name}({stock_code}) 的影响。"
@@ -69,7 +84,7 @@ def _BuildNewsScoringPrompt(stock_name: str, stock_code: str) -> str:
         "板块类资讯优先 mismatch 而非涨；"
         "5. 禁止无证据写「产业链受益」「题材匹配」；"
         f"6. relevant=false 或 impact=无关 仅用于与{domain}完全无关的内容；"
-        f"{oil_extra}"
+        f"{domain_extra}"
         "7. strength 表示影响强度，5 最强。仅输出 JSON。"
     )
 
@@ -403,6 +418,13 @@ def _ApplyRuleFallback(
                 "海峡", "地缘", "油服", "页岩油", "油气",
             )
         )
+        nf_boost = IsNonferrousGroup() and any(
+            kw in text
+            for kw in (
+                "电解铝", "氧化铝", "铝价", "有色", "煤炭", "动力煤",
+                "限电", "产能", "水电铝", "沪铝",
+            )
+        )
 
         if cat == "stock":
             directness = "direct"
@@ -414,6 +436,17 @@ def _ApplyRuleFallback(
                 impact = "跌"
                 strength = 4
             elif any(k in text for k in ("冲突", "制裁", "袭击", "封锁", "减产")):
+                impact = "涨"
+                strength = 4
+            else:
+                impact = "中性"
+                strength = 3
+        elif nf_boost:
+            directness = "indirect"
+            if any(k in text for k in ("铝价大跌", "大跌", "过剩", "复产放量")):
+                impact = "跌"
+                strength = 4
+            elif any(k in text for k in ("铝价大涨", "限电", "减产", "板块大涨", "普涨")):
                 impact = "涨"
                 strength = 4
             else:

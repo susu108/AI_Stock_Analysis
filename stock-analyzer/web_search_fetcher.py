@@ -179,7 +179,7 @@ def _NormalizeSearchResult(raw: dict[str, str], query: str) -> dict[str, str]:
 
 def BuildSearchQueries(stock_name: str, stock_code: str, themes: list[str]) -> list[str]:
     """构造并行搜索 query 列表。"""
-    from oil_short_playbook import IsOilShortGroup
+    from oil_short_playbook import IsNonferrousGroup, IsOilShortGroup
     from sector_catalyst_watch import ResolvePeerWatchList
 
     today = datetime.now()
@@ -194,6 +194,14 @@ def BuildSearchQueries(stock_name: str, stock_code: str, themes: list[str]) -> l
             "布伦特 WTI 油价",
             f"{stock_name} 油气 短线",
         ])
+    elif IsNonferrousGroup():
+        queries.extend([
+            f"{yesterday} 电解铝 铝价",
+            "有色板块 电解铝 行情",
+            f"{stock_name} 铝价 产能",
+        ])
+        for theme in themes[:2]:
+            queries.append(f"{theme} A股 有色")
     else:
         queries.append("国家基药目录 医保 药监 最新 政策")
         for theme in themes[:2]:

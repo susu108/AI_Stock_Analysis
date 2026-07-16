@@ -1,6 +1,6 @@
 # 股票分析钉钉定时推送（GitHub Actions）
 # 北京时间 09:00 / 11:30 / 14:30，每日触发（含周末与法定节假日）
-# matrix: pharma → 旧群；oil_short → 石油短线新群
+# matrix: pharma/nonferrous → 共用 default 群；oil_short → 石油短线新群
 
 name: Stock Analyzer Push
 
@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [pharma, oil_short]
+        group: [pharma, oil_short, nonferrous]
     defaults:
       run:
         working-directory: stock-analyzer

@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [pharma, oil_short]
+        group: [pharma, oil_short, nonferrous]
     defaults:
       run:
         working-directory: stock-analyzer
