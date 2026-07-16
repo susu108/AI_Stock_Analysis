@@ -1030,6 +1030,31 @@ def RunNewsFreshnessAndDedupTest() -> bool:
     ])
 
 
+def RunNewsWatchWindowTest() -> bool:
+    """资讯哨兵四定点窗口：每天 09:00/12:30/18:00/22:00 ±10 分钟，含周末。"""
+    from news_alert_gate import IsInNewsWatchWindow
+
+    sat_morning = datetime(2026, 7, 18, 9, 0)   # 周六
+    weekday_night = datetime(2026, 7, 15, 22, 0)  # 周三
+    weekday_noon = datetime(2026, 7, 15, 12, 30)
+    weekday_evening = datetime(2026, 7, 15, 18, 0)
+    weekday_outside = datetime(2026, 7, 15, 15, 0)
+    weekday_before = datetime(2026, 7, 15, 8, 40)  # 距 09:00 槽 >10 分钟
+    slot_edge = datetime(2026, 7, 15, 9, 10)   # 09:00 +10 分钟边界
+    slot_outside = datetime(2026, 7, 15, 9, 11)  # 超出 ±10
+
+    return all([
+        IsInNewsWatchWindow(sat_morning),
+        IsInNewsWatchWindow(weekday_night),
+        IsInNewsWatchWindow(weekday_noon),
+        IsInNewsWatchWindow(weekday_evening),
+        not IsInNewsWatchWindow(weekday_outside),
+        not IsInNewsWatchWindow(weekday_before),
+        IsInNewsWatchWindow(slot_edge),
+        not IsInNewsWatchWindow(slot_outside),
+    ])
+
+
 def RunCatalystLlmDisplayTest() -> bool:
     """哨兵报告展示 AI 催化解读、发布时间；规则兜底不含占位语。"""
     from dingtalk_pusher import (
@@ -1506,6 +1531,9 @@ def RunMockTest() -> None:
     fresh_dedup_ok = RunNewsFreshnessAndDedupTest()
     print(f"哨兵新鲜度与去重: {'通过' if fresh_dedup_ok else '失败'}")
 
+    news_watch_window_ok = RunNewsWatchWindowTest()
+    print(f"资讯哨兵四槽窗口: {'通过' if news_watch_window_ok else '失败'}")
+
     catalyst_llm_ok = RunCatalystLlmDisplayTest()
     print(f"AI催化解读展示: {'通过' if catalyst_llm_ok else '失败'}")
 
@@ -1534,6 +1562,7 @@ def RunMockTest() -> None:
         or not multi_stock_ok or not oil_group_ok
         or not oil_short_play_ok or not catalyst_alert_ok
         or not news_watch_title_ok or not fresh_dedup_ok
+        or not news_watch_window_ok
         or not catalyst_llm_ok
         or not news_prefetch_ok or not news_judge_ok
     ):

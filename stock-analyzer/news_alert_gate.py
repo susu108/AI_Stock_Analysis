@@ -31,24 +31,24 @@ _STRONG_OIL = (
 )
 
 
+_NEWS_WATCH_SLOTS = (
+    (9, 0),   # 09:00
+    (12, 30), # 12:30
+    (18, 0),  # 18:00
+    (22, 0),  # 22:00
+)
+_NEWS_WATCH_SLOT_TOLERANCE_MIN = 10
+
+
 def IsInNewsWatchWindow(now: datetime | None = None) -> bool:
-    """交易日资讯哨兵窗口：09:05-11:25、13:00-14:55（避开正式推送点）。"""
+    """资讯哨兵窗口：每天四定点 ±10 分钟（含周末）。"""
     dt = now or datetime.now()
-    if dt.weekday() >= 5:
-        return False
     minutes = dt.hour * 60 + dt.minute
-    morning = 9 * 60 + 5 <= minutes <= 11 * 60 + 25
-    afternoon = 13 * 60 <= minutes <= 14 * 60 + 55
-    near_scheduled = minutes in {
-        9 * 60, 9 * 60 + 1, 9 * 60 + 2, 9 * 60 + 3, 9 * 60 + 4,
-        11 * 60 + 26, 11 * 60 + 27, 11 * 60 + 28, 11 * 60 + 29, 11 * 60 + 30,
-        11 * 60 + 31, 11 * 60 + 32, 11 * 60 + 33, 11 * 60 + 34,
-        14 * 60 + 26, 14 * 60 + 27, 14 * 60 + 28, 14 * 60 + 29, 14 * 60 + 30,
-        14 * 60 + 31, 14 * 60 + 32, 14 * 60 + 33, 14 * 60 + 34,
-    }
-    if near_scheduled:
-        return False
-    return morning or afternoon
+    for hour, minute in _NEWS_WATCH_SLOTS:
+        slot = hour * 60 + minute
+        if abs(minutes - slot) <= _NEWS_WATCH_SLOT_TOLERANCE_MIN:
+            return True
+    return False
 
 
 def ParseNewsItemDateTime(item: dict[str, Any]) -> datetime | None:
