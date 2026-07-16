@@ -35,9 +35,8 @@ _STRONG_NONFERROUS = (
 )
 
 
-_NEWS_WATCH_SLOTS = (
-    (9, 0),   # 09:00
-    (12, 30), # 12:30
+# 盘外定点（含周末）：晚间/夜里扫隔夜资讯
+_NEWS_WATCH_OFF_HOURS_SLOTS = (
     (18, 0),  # 18:00
     (22, 0),  # 22:00
 )
@@ -45,12 +44,23 @@ _NEWS_WATCH_SLOT_TOLERANCE_MIN = 10
 
 
 def IsInNewsWatchWindow(now: datetime | None = None) -> bool:
-    """资讯哨兵窗口：每天四定点 ±10 分钟（含周末）。"""
+    """资讯哨兵窗口：工作日盘中连续区间 + 每天晚间定点 ±10 分钟。
+
+    盘中（仅工作日）：09:30–11:30、13:00–15:00（由 cron */15 触发）。
+    盘外（每天含周末）：18:00、22:00 ±10 分钟。
+    """
     dt = now or datetime.now()
     minutes = dt.hour * 60 + dt.minute
-    for hour, minute in _NEWS_WATCH_SLOTS:
+
+    for hour, minute in _NEWS_WATCH_OFF_HOURS_SLOTS:
         slot = hour * 60 + minute
         if abs(minutes - slot) <= _NEWS_WATCH_SLOT_TOLERANCE_MIN:
+            return True
+
+    if dt.weekday() < 5:
+        morning = 9 * 60 + 30 <= minutes <= 11 * 60 + 30
+        afternoon = 13 * 60 <= minutes <= 15 * 60
+        if morning or afternoon:
             return True
     return False
 

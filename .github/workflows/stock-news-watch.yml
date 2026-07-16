@@ -1,8 +1,8 @@
 # 资讯哨兵：命中强催化后即时推送（与定时 09:00/11:30/14:30 并存）
-# 由 cron-job.org 每天四定点 repository_dispatch type=stock-news-watch 触发
-# 建议 cron（Asia/Shanghai，每天含周末）：
-#   Job1: 0 9,18,22 * * *  → 09:00 / 18:00 / 22:00
-#   Job2: 30 12 * * *      → 12:30
+# 由 cron-job.org repository_dispatch type=stock-news-watch 触发
+# 建议 cron（Asia/Shanghai）：
+#   Job1: */15 9-14 * * 1-5  → 工作日盘中约每 15 分钟（窗外由门控丢弃）
+#   Job2: 0 18,22 * * *      → 每天 18:00 / 22:00（含周末）
 
 name: Stock News Watch
 
@@ -139,15 +139,18 @@ jobs:
             echo "ignore_window flag set"
             exit 0
           fi
-          # 每天四定点 ±10 分钟（含周末），与 main.py IsInNewsWatchWindow 一致
+          # 与 main.py IsInNewsWatchWindow 一致：
+          # 工作日 09:30–11:30 / 13:00–15:00；每天 18:00/22:00 ±10 分钟
+          DOW=$(TZ=Asia/Shanghai date +%u)   # 1=Mon ... 7=Sun
           HM=$(TZ=Asia/Shanghai date +%H%M)
+          cur_h=$((10#$HM / 100))
+          cur_m=$((10#$HM % 100))
+          cur_min=$((cur_h * 60 + cur_m))
           in_window=false
-          for slot in 0900 1230 1800 2200; do
+
+          for slot in 1800 2200; do
             sh=$((10#$slot / 100))
             sm=$((10#$slot % 100))
-            cur_h=$((10#$HM / 100))
-            cur_m=$((10#$HM % 100))
-            cur_min=$((cur_h * 60 + cur_m))
             slot_min=$((sh * 60 + sm))
             diff=$((cur_min - slot_min))
             if [ "$diff" -lt 0 ]; then diff=$((-diff)); fi
@@ -156,12 +159,20 @@ jobs:
               break
             fi
           done
+
+          if [ "$in_window" != "true" ] && [ "$DOW" -le 5 ]; then
+            if { [ "$cur_min" -ge $((9 * 60 + 30)) ] && [ "$cur_min" -le $((11 * 60 + 30)) ]; } || \
+               { [ "$cur_min" -ge $((13 * 60)) ] && [ "$cur_min" -le $((15 * 60)) ]; }; then
+              in_window=true
+            fi
+          fi
+
           if [ "$in_window" = "true" ]; then
             echo "in_window=true" >> "$GITHUB_OUTPUT"
-            echo "in news-watch slot (HM=$HM)"
+            echo "in news-watch window (HM=$HM DOW=$DOW)"
           else
             echo "in_window=false" >> "$GITHUB_OUTPUT"
-            echo "outside news-watch slots, skip (HM=$HM)"
+            echo "outside news-watch window, skip (HM=$HM DOW=$DOW)"
           fi
 
       - name: Ensure dedup file exists

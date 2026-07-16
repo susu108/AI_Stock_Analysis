@@ -1105,27 +1105,32 @@ def RunNewsFreshnessAndDedupTest() -> bool:
 
 
 def RunNewsWatchWindowTest() -> bool:
-    """资讯哨兵四定点窗口：每天 09:00/12:30/18:00/22:00 ±10 分钟，含周末。"""
+    """资讯哨兵：工作日盘中区间 + 每天 18/22 定点；周末不跑盘中。"""
     from news_alert_gate import IsInNewsWatchWindow
 
-    sat_morning = datetime(2026, 7, 18, 9, 0)   # 周六
-    weekday_night = datetime(2026, 7, 15, 22, 0)  # 周三
-    weekday_noon = datetime(2026, 7, 15, 12, 30)
+    # 2026-07-15 周三；2026-07-18 周六
+    weekday_am = datetime(2026, 7, 15, 9, 45)
+    weekday_pm = datetime(2026, 7, 15, 13, 15)
+    weekday_mid = datetime(2026, 7, 15, 10, 7)   # 区间内（不要求 %15）
+    weekday_lunch = datetime(2026, 7, 15, 12, 0)
+    weekday_after = datetime(2026, 7, 15, 15, 30)
+    weekday_before = datetime(2026, 7, 15, 9, 20)
     weekday_evening = datetime(2026, 7, 15, 18, 0)
-    weekday_outside = datetime(2026, 7, 15, 15, 0)
-    weekday_before = datetime(2026, 7, 15, 8, 40)  # 距 09:00 槽 >10 分钟
-    slot_edge = datetime(2026, 7, 15, 9, 10)   # 09:00 +10 分钟边界
-    slot_outside = datetime(2026, 7, 15, 9, 11)  # 超出 ±10
+    weekday_night = datetime(2026, 7, 15, 22, 0)
+    sat_intraday = datetime(2026, 7, 18, 10, 0)
+    sat_evening = datetime(2026, 7, 18, 18, 0)
 
     return all([
-        IsInNewsWatchWindow(sat_morning),
-        IsInNewsWatchWindow(weekday_night),
-        IsInNewsWatchWindow(weekday_noon),
-        IsInNewsWatchWindow(weekday_evening),
-        not IsInNewsWatchWindow(weekday_outside),
+        IsInNewsWatchWindow(weekday_am),
+        IsInNewsWatchWindow(weekday_pm),
+        IsInNewsWatchWindow(weekday_mid),
+        not IsInNewsWatchWindow(weekday_lunch),
+        not IsInNewsWatchWindow(weekday_after),
         not IsInNewsWatchWindow(weekday_before),
-        IsInNewsWatchWindow(slot_edge),
-        not IsInNewsWatchWindow(slot_outside),
+        IsInNewsWatchWindow(weekday_evening),
+        IsInNewsWatchWindow(weekday_night),
+        not IsInNewsWatchWindow(sat_intraday),
+        IsInNewsWatchWindow(sat_evening),
     ])
 
 
@@ -1609,7 +1614,7 @@ def RunMockTest() -> None:
     print(f"哨兵新鲜度与去重: {'通过' if fresh_dedup_ok else '失败'}")
 
     news_watch_window_ok = RunNewsWatchWindowTest()
-    print(f"资讯哨兵四槽窗口: {'通过' if news_watch_window_ok else '失败'}")
+    print(f"资讯哨兵盘中窗口: {'通过' if news_watch_window_ok else '失败'}")
 
     catalyst_llm_ok = RunCatalystLlmDisplayTest()
     print(f"AI催化解读展示: {'通过' if catalyst_llm_ok else '失败'}")
